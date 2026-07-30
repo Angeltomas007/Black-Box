@@ -187,6 +187,15 @@ recommandation claire sans jamais toucher un broker.
   backtest détaillé (Sharpe/Sortino/max drawdown/CAGR/turnover) et
   aperçu des données brutes.
 
+### Lancement en un clic (sans taper de commande)
+
+`scripts/run_scanner.bat` (Windows), `scripts/run_scanner.command`
+(macOS) ou `scripts/run_scanner.sh` (Linux) clonent le dépôt, créent un
+environnement virtuel, installent les dépendances et lancent le
+scanner -- tout reste local, rien n'est mis en ligne. Télécharge le
+script correspondant à ton OS et double-clique dessus (Git et Python 3
+doivent être installés au préalable).
+
 ```bash
 pip install -r requirements-web.txt
 streamlit run webapp/app.py
