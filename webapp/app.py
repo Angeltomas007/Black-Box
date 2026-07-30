@@ -78,10 +78,6 @@ st.markdown(
         display: inline-flex; align-items: center; gap: 8px; font-size: 1.3rem;
         font-weight: 700; padding: 6px 20px; border-radius: 999px; color: #fff;
     }
-    .bb-badge-sm {
-        display: inline-flex; align-items: center; gap: 6px; font-size: 0.85rem;
-        font-weight: 700; padding: 3px 12px; border-radius: 999px; color: #fff;
-    }
     .bb-sub { color: var(--bb-text-secondary); font-size: 0.95rem; margin-top: 8px; }
     .bb-tier {
         text-align: center; padding: 14px 10px; border-radius: 12px;
@@ -89,7 +85,6 @@ st.markdown(
     }
     .bb-tier-name { color: var(--bb-text-secondary); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
     .bb-tier-val { font-size: 1.15rem; font-weight: 700; margin-top: 4px; color: var(--bb-text); }
-    .bb-mini-title { font-weight: 700; font-size: 1rem; margin-bottom: 4px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -661,51 +656,6 @@ def render_scanner() -> None:
         fig, use_container_width=True, key="main_chart",
         config={"scrollZoom": False, "displaylogo": False},
     )
-
-    # -- Multi-timeframe strip: the same decision, at a glance, across
-    # every preset timeframe (not just the one selected above) --
-
-    st.subheader("Vue multi-horizons")
-    st.caption("Le même symbole, analysé sur chacun des 4 horizons -- pratique pour repérer un signal qui n'apparaît que sur certains timeframes.")
-
-    mini_cols = st.columns(2)
-    for i, (mini_label, mini_conf) in enumerate(TIMEFRAME_OPTIONS.items()):
-        with mini_cols[i % 2]:
-            if mini_label == tf_label:
-                mini_df, mini_tiers, mini_primary = df, tiers, primary_side
-                mini_price, mini_stop, mini_tp = price, stop, tp
-                mini_error = None
-            else:
-                mini_df, _, mini_error = _load_data(symbol, mini_conf, demo_mode, uploaded)
-                if not mini_error and mini_df is not None and not mini_df.empty:
-                    mini_df = DataCleaner.clean(mini_df)
-                    if len(mini_df) < max(slow, lookback) + 10:
-                        mini_error = "historique insuffisant pour ces paramètres"
-                if not mini_error:
-                    mini_tiers = _run_three_tier(mini_df, mini_conf, lookback, entry_z, exit_z, fast, slow)
-                    mini_primary = mini_tiers["primary_side"]
-                    mini_price, _, mini_stop, mini_tp = _compute_levels(mini_df, mini_primary, atr_stop_mult, atr_tp_mult, capital)
-
-            mini_badge_color = {1: GOOD, -1: CRITICAL, 0: MUTED}[mini_primary] if not mini_error else MUTED
-            mini_badge_text = {1: "ACHAT", -1: "VENTE", 0: "NEUTRE"}.get(mini_primary, "N/D") if not mini_error else "ERREUR"
-
-            st.markdown(
-                f'<div class="bb-mini-title">{mini_label} '
-                f'<span class="bb-badge-sm" style="background:{mini_badge_color};">{mini_badge_text}</span></div>',
-                unsafe_allow_html=True,
-            )
-            if mini_error:
-                st.caption(f"Indisponible : {mini_error}")
-            else:
-                mini_window = mini_df.tail(min(120, len(mini_df)))
-                mini_fig = _build_chart(
-                    mini_window, mini_tiers, mini_primary, mini_price, mini_stop, mini_tp,
-                    mini_badge_color, show_rsi=False, height=300,
-                )
-                st.plotly_chart(
-                    mini_fig, use_container_width=True, key=f"mini_chart_{i}",
-                    config={"scrollZoom": False, "displaylogo": False},
-                )
 
     # -- Advanced sections: meta-model, full backtest, raw data --
 
