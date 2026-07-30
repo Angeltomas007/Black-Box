@@ -78,6 +78,10 @@ st.markdown(
         display: inline-flex; align-items: center; gap: 8px; font-size: 1.3rem;
         font-weight: 700; padding: 6px 20px; border-radius: 999px; color: #fff;
     }
+    .bb-badge-sm {
+        display: inline-flex; align-items: center; gap: 6px; font-size: 0.85rem;
+        font-weight: 700; padding: 3px 12px; border-radius: 999px; color: #fff;
+    }
     .bb-sub { color: var(--bb-text-secondary); font-size: 0.95rem; margin-top: 8px; }
     .bb-tier {
         text-align: center; padding: 14px 10px; border-radius: 12px;
@@ -85,7 +89,7 @@ st.markdown(
     }
     .bb-tier-name { color: var(--bb-text-secondary); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
     .bb-tier-val { font-size: 1.15rem; font-weight: 700; margin-top: 4px; color: var(--bb-text); }
-    .bb-section-title { margin-top: 4px; }
+    .bb-mini-title { font-weight: 700; font-size: 1rem; margin-bottom: 4px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -192,6 +196,177 @@ def _search_symbols(query: str) -> list[dict]:
     return results
 
 
+def _load_data(symbol: str, tf_conf: dict, demo_mode: bool, uploaded) -> tuple[pd.DataFrame | None, str, str | None]:
+    """Returns (df, label, error) for one timeframe config."""
+    if uploaded is not None:
+        try:
+            return _load_csv(uploaded), "CSV importé", None
+        except Exception as exc:
+            return None, "", str(exc)
+    if demo_mode:
+        freq = {"5min": "5min", "15min": "15min", "1H": "1h", "1D": "1D"}[tf_conf["bar_size"]]
+        n_bars = 600 if tf_conf["bar_size"] in ("5min", "15min") else 400
+        df = _generate_synthetic_ohlcv(n_bars, freq, "mean_reverting", seed=hash(symbol) % 1000)
+        return df, f"{symbol.upper()} (démo synthétique)", None
+    try:
+        df = _fetch_yfinance(symbol.strip().upper(), tf_conf["start"], tf_conf["bar_size"])
+        return df, f"{symbol.upper()} (yfinance)", None
+    except Exception as exc:
+        return None, "", str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Signal + chart helpers (shared between the main detailed view and the
+# multi-timeframe strip, so both stay in sync with the same logic).
+# ---------------------------------------------------------------------------
+
+def _run_three_tier(df: pd.DataFrame, tf_conf: dict, lookback: int, entry_z: float, exit_z: float, fast: int, slow: int) -> dict:
+    mr = MeanReversionSignal(lookback=lookback, entry_z=entry_z, exit_z=exit_z)
+    mom = MomentumSignal(fast=fast, slow=slow)
+    pa = PriceActionConfluenceSignal(htf_rule=tf_conf["htf_rule"])
+
+    mr_result = mr.generate(df)
+    mom_result = mom.generate(df)
+    pa_result = pa.generate(df)
+
+    last_mr = int(mr_result.side.iloc[-1])
+    last_mom = int(mom_result.side.iloc[-1])
+    last_pa = int(pa_result.side.iloc[-1])
+    pa_strength = float(pa_result.strength.iloc[-1])
+
+    if last_mr != 0:
+        active_tier, primary_side = "Mean-reversion", last_mr
+    elif last_mom != 0:
+        active_tier, primary_side = "Momentum", last_mom
+    else:
+        active_tier, primary_side = "Price-action", last_pa
+
+    confidence = pa_strength if active_tier == "Price-action" and primary_side != 0 else 0.5
+    return dict(
+        mr_result=mr_result, mom_result=mom_result, pa_result=pa_result,
+        last_mr=last_mr, last_mom=last_mom, last_pa=last_pa,
+        active_tier=active_tier, primary_side=primary_side, confidence=confidence,
+    )
+
+
+def _compute_levels(df: pd.DataFrame, primary_side: int, atr_stop_mult: float, atr_tp_mult: float, capital: float):
+    price = float(df["close"].iloc[-1])
+    atr = float(average_true_range(df).iloc[-1])
+    stop = tp = None
+    if primary_side != 0:
+        limits = RiskLimits(atr_stop_multiple=atr_stop_mult, atr_tp_multiple=atr_tp_mult)
+        rm = RiskManager(limits=limits, starting_equity=capital)
+        stop = rm.compute_stop_price(price, atr, primary_side)
+        tp = rm.compute_take_profit_price(price, atr, primary_side)
+    return price, atr, stop, tp
+
+
+def _compute_rangebreaks(window: pd.DataFrame) -> list:
+    """Nights/weekends/closures show up as flat dead space on a
+    continuous time axis, squeezing real candles into sparse-looking
+    clusters. Derive the actual gaps from this window's own bar
+    spacing (works for any bar size or exchange hours) and skip them."""
+    inferred_freq = window.index.to_series().diff().median()
+    if pd.notna(inferred_freq) and inferred_freq > pd.Timedelta(0):
+        full_range = pd.date_range(window.index.min(), window.index.max(), freq=inferred_freq)
+        observed = set(window.index)
+        missing = [ts for ts in full_range if ts not in observed]
+        if missing:
+            return [dict(values=missing)]
+    return []
+
+
+def _build_chart(
+    window: pd.DataFrame, tiers: dict, primary_side: int, price: float, stop: float | None, tp: float | None,
+    badge_color: str, show_rsi: bool = True, height: int = 640,
+) -> go.Figure:
+    rangebreaks = _compute_rangebreaks(window)
+    rows = 2 if show_rsi else 1
+    row_heights = [0.75, 0.25] if show_rsi else [1.0]
+
+    fig = make_subplots(rows=rows, cols=1, shared_xaxes=show_rsi, row_heights=row_heights, vertical_spacing=0.05)
+    fig.add_trace(
+        go.Candlestick(
+            x=window.index, open=window["open"], high=window["high"], low=window["low"], close=window["close"],
+            name="Prix", showlegend=False, increasing_line_color=GOOD, decreasing_line_color=CRITICAL,
+            increasing_fillcolor=GOOD, decreasing_fillcolor=CRITICAL,
+        ),
+        row=1, col=1,
+    )
+
+    long_ts: set = set()
+    short_ts: set = set()
+    for res in (tiers["mr_result"], tiers["mom_result"], tiers["pa_result"]):
+        side = res.side.reindex(window.index).fillna(0)
+        entered = side.diff().fillna(side)
+        long_ts.update(window.index[(side == 1) & (entered != 0)])
+        short_ts.update(window.index[(side == -1) & (entered != 0)])
+
+    longs = window.index[window.index.isin(long_ts)]
+    shorts = window.index[window.index.isin(short_ts)]
+    marker_size = 22 if show_rsi else 14
+    if len(longs):
+        fig.add_trace(
+            go.Scatter(
+                x=longs, y=window.loc[longs, "low"] * 0.985, mode="markers", name="Achat",
+                marker=dict(color=GOOD, symbol="triangle-up", size=marker_size, line=dict(width=1.5, color="white")),
+            ),
+            row=1, col=1,
+        )
+    if len(shorts):
+        fig.add_trace(
+            go.Scatter(
+                x=shorts, y=window.loc[shorts, "high"] * 1.015, mode="markers", name="Vente",
+                marker=dict(color=CRITICAL, symbol="triangle-down", size=marker_size, line=dict(width=1.5, color="white")),
+            ),
+            row=1, col=1,
+        )
+
+    if primary_side != 0 and stop is not None and tp is not None:
+        fig.add_hline(
+            y=price, line_dash="solid", line_color=badge_color, opacity=0.9, line_width=2,
+            annotation_text=f"Entrée {price:.2f}", annotation_position="right",
+            annotation_font_color=badge_color, row=1, col=1,
+        )
+        fig.add_hline(
+            y=stop, line_dash="dash", line_color=CRITICAL, opacity=0.8, line_width=1.5,
+            annotation_text=f"Stop {stop:.2f}", annotation_position="right",
+            annotation_font_color=CRITICAL, row=1, col=1,
+        )
+        fig.add_hline(
+            y=tp, line_dash="dash", line_color=GOOD, opacity=0.8, line_width=1.5,
+            annotation_text=f"Objectif {tp:.2f}", annotation_position="right",
+            annotation_font_color=GOOD, row=1, col=1,
+        )
+
+    if show_rsi:
+        rsi_series = compute_rsi(window["close"])
+        fig.add_trace(
+            go.Scatter(x=window.index, y=rsi_series, name="RSI", showlegend=False, line=dict(color=TIER_COLORS["Price-action"], width=1.5)),
+            row=2, col=1,
+        )
+        fig.add_hline(y=65, line_dash="dot", line_color=CRITICAL, opacity=0.6, row=2, col=1)
+        fig.add_hline(y=35, line_dash="dot", line_color=GOOD, opacity=0.6, row=2, col=1)
+
+    fig.update_layout(
+        height=height, template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(t=10, b=10, l=10, r=55), dragmode="zoom",
+    )
+    if show_rsi:
+        # Rangeslider goes on the bottom-most (RSI) row only -- putting
+        # it on row 1 as well (or relying on go.Candlestick's own
+        # default, which is enabled) makes it render *between* the two
+        # rows instead of below both.
+        fig.update_xaxes(rangeslider=dict(visible=False), rangebreaks=rangebreaks, row=1, col=1)
+        fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.08), rangebreaks=rangebreaks, row=2, col=1)
+        fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
+    else:
+        fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.12), rangebreaks=rangebreaks, row=1, col=1)
+    fig.update_yaxes(title_text="Prix", fixedrange=False, row=1, col=1)
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Header + scanner search bar (static -- lives outside the auto-refreshing
 # fragment since changing symbol/timeframe/params should always trigger a
@@ -289,27 +464,7 @@ st.divider()
 
 @st.fragment(run_every=AUTO_REFRESH_SECONDS if auto_refresh else None)
 def render_scanner() -> None:
-    df: pd.DataFrame | None = None
-    load_error: str | None = None
-    label = ""
-
-    if uploaded is not None:
-        try:
-            df = _load_csv(uploaded)
-            label = "CSV importé"
-        except Exception as exc:
-            load_error = str(exc)
-    elif demo_mode:
-        freq = {"5min": "5min", "15min": "15min", "1H": "1h", "1D": "1D"}[tf_conf["bar_size"]]
-        n_bars = 600 if tf_conf["bar_size"] in ("5min", "15min") else 400
-        df = _generate_synthetic_ohlcv(n_bars, freq, "mean_reverting", seed=hash(symbol) % 1000)
-        label = f"{symbol.upper()} (démo synthétique, {tf_label})"
-    else:
-        try:
-            df = _fetch_yfinance(symbol.strip().upper(), tf_conf["start"], tf_conf["bar_size"])
-            label = f"{symbol.upper()} ({tf_label}, yfinance)"
-        except Exception as exc:
-            load_error = str(exc)
+    df, label, load_error = _load_data(symbol, tf_conf, demo_mode, uploaded)
 
     if load_error:
         st.error(
@@ -332,33 +487,13 @@ def render_scanner() -> None:
         )
         st.stop()
 
-    # -- Three-tier signal fallback (mean-reversion -> momentum -> price-action) --
-
-    mr = MeanReversionSignal(lookback=lookback, entry_z=entry_z, exit_z=exit_z)
-    mom = MomentumSignal(fast=fast, slow=slow)
-    pa = PriceActionConfluenceSignal(htf_rule=tf_conf["htf_rule"])
-
     with st.spinner("Analyse en cours (le test ADF de stationnarité peut prendre quelques secondes)..."):
-        mr_result = mr.generate(df)
-        mom_result = mom.generate(df)
-        pa_result = pa.generate(df)
+        tiers = _run_three_tier(df, tf_conf, lookback, entry_z, exit_z, fast, slow)
 
-    last_mr = int(mr_result.side.iloc[-1])
-    last_mom = int(mom_result.side.iloc[-1])
-    last_pa = int(pa_result.side.iloc[-1])
-    pa_strength = float(pa_result.strength.iloc[-1])
-
-    if last_mr != 0:
-        active_tier, primary_side = "Mean-reversion", last_mr
-    elif last_mom != 0:
-        active_tier, primary_side = "Momentum", last_mom
-    else:
-        active_tier, primary_side = "Price-action", last_pa
-
-    confidence = pa_strength if active_tier == "Price-action" and primary_side != 0 else 0.5
-
-    price = float(df["close"].iloc[-1])
-    atr = float(average_true_range(df).iloc[-1])
+    primary_side = tiers["primary_side"]
+    active_tier = tiers["active_tier"]
+    confidence = tiers["confidence"]
+    price, atr, stop, tp = _compute_levels(df, primary_side, atr_stop_mult, atr_tp_mult, capital)
     last_ts = df.index[-1]
 
     # -- Recommendation card --
@@ -391,10 +526,6 @@ def render_scanner() -> None:
 
     with card_col:
         if primary_side != 0:
-            limits = RiskLimits(atr_stop_multiple=atr_stop_mult, atr_tp_multiple=atr_tp_mult)
-            rm = RiskManager(limits=limits, starting_equity=capital)
-            stop = rm.compute_stop_price(price, atr, primary_side)
-            tp = rm.compute_take_profit_price(price, atr, primary_side)
             risk = abs(price - stop)
             reward = abs(tp - price)
             rr = reward / risk if risk > 0 else 0.0
@@ -410,9 +541,9 @@ def render_scanner() -> None:
         st.markdown("**Pourquoi cette décision ?**")
         t1, t2, t3 = st.columns(3)
         for col, name, side in (
-            (t1, "Mean-reversion", last_mr),
-            (t2, "Momentum", last_mom),
-            (t3, "Price-action", last_pa),
+            (t1, "Mean-reversion", tiers["last_mr"]),
+            (t2, "Momentum", tiers["last_mom"]),
+            (t3, "Price-action", tiers["last_pa"]),
         ):
             icon = "🟢" if side == 1 else "🔴" if side == -1 else "⚪"
             word = "LONG" if side == 1 else "SHORT" if side == -1 else "Neutre"
@@ -454,119 +585,70 @@ def render_scanner() -> None:
     st.subheader("Bougies et RSI")
     st.caption(
         "▲ vert = achat, ▼ rouge = vente. Ligne pleine = entrée, pointillé rouge = stop, "
-        "pointillé vert = objectif (take-profit). Utilise les boutons +/- ou glisse-sélectionne "
-        "pour zoomer (la molette de la souris ne fait pas défiler le graphique -- elle fait "
-        "défiler la page)."
+        "pointillé vert = objectif (take-profit). Boutons +/- ou glisser-sélectionner pour "
+        "zoomer le temps, curseur sous le graphique pour naviguer, glisser directement sur "
+        "les prix à droite pour zoomer l'échelle -- la molette ne fait pas défiler le "
+        "graphique, elle fait défiler la page."
     )
 
     window = df.tail(min(200, len(df)))
-    rsi_series = compute_rsi(df["close"]).reindex(window.index)
-
-    # Nights/weekends/market closures otherwise show up as flat empty
-    # gaps on a continuous time axis, squeezing the actual candles into
-    # sparse-looking clusters. Compute the gaps directly from this
-    # window's own bar spacing (works for any bar size or exchange
-    # hours, not just a hardcoded market calendar) and skip them.
-    inferred_freq = window.index.to_series().diff().median()
-    rangebreaks = []
-    if pd.notna(inferred_freq) and inferred_freq > pd.Timedelta(0):
-        full_range = pd.date_range(window.index.min(), window.index.max(), freq=inferred_freq)
-        observed = set(window.index)
-        missing = [ts for ts in full_range if ts not in observed]
-        if missing:
-            rangebreaks = [dict(values=missing)]
-
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.05,
-    )
-    fig.add_trace(
-        go.Candlestick(
-            x=window.index, open=window["open"], high=window["high"], low=window["low"], close=window["close"],
-            name="Prix", showlegend=False, increasing_line_color=GOOD, decreasing_line_color=CRITICAL,
-            increasing_fillcolor=GOOD, decreasing_fillcolor=CRITICAL,
-        ),
-        row=1, col=1,
-    )
-
-    # Universal buy/sell arrows (green up / red down) merged across all
-    # three tiers -- which tier fired is broken out separately in the
-    # "Pourquoi cette décision ?" panel above.
-    long_ts: set = set()
-    short_ts: set = set()
-    for res in (mr_result, mom_result, pa_result):
-        side = res.side.reindex(window.index).fillna(0)
-        entered = side.diff().fillna(side)
-        long_ts.update(window.index[(side == 1) & (entered != 0)])
-        short_ts.update(window.index[(side == -1) & (entered != 0)])
-
-    longs = window.index[window.index.isin(long_ts)]
-    shorts = window.index[window.index.isin(short_ts)]
-    if len(longs):
-        fig.add_trace(
-            go.Scatter(
-                x=longs, y=window.loc[longs, "low"] * 0.985, mode="markers", name="Achat",
-                marker=dict(color=GOOD, symbol="triangle-up", size=22, line=dict(width=2, color="white")),
-            ),
-            row=1, col=1,
-        )
-    if len(shorts):
-        fig.add_trace(
-            go.Scatter(
-                x=shorts, y=window.loc[shorts, "high"] * 1.015, mode="markers", name="Vente",
-                marker=dict(color=CRITICAL, symbol="triangle-down", size=22, line=dict(width=2, color="white")),
-            ),
-            row=1, col=1,
-        )
-
-    # Entry/stop/take-profit levels of the current decision -- the
-    # take-profit line doubles as "the maximum level this is expected
-    # to reach" for a long, the stop as the downside boundary (mirrored
-    # for a short).
-    if primary_side != 0:
-        fig.add_hline(
-            y=price, line_dash="solid", line_color=badge_color, opacity=0.9, line_width=2,
-            annotation_text=f"Entrée {price:.2f}", annotation_position="right",
-            annotation_font_color=badge_color, row=1, col=1,
-        )
-        fig.add_hline(
-            y=stop, line_dash="dash", line_color=CRITICAL, opacity=0.8, line_width=1.5,
-            annotation_text=f"Stop {stop:.2f}", annotation_position="right",
-            annotation_font_color=CRITICAL, row=1, col=1,
-        )
-        fig.add_hline(
-            y=tp, line_dash="dash", line_color=GOOD, opacity=0.8, line_width=1.5,
-            annotation_text=f"Objectif {tp:.2f}", annotation_position="right",
-            annotation_font_color=GOOD, row=1, col=1,
-        )
-
-    fig.add_trace(
-        go.Scatter(x=window.index, y=rsi_series, name="RSI", showlegend=False, line=dict(color=TIER_COLORS["Price-action"], width=1.5)),
-        row=2, col=1,
-    )
-    fig.add_hline(y=65, line_dash="dot", line_color=CRITICAL, opacity=0.6, row=2, col=1)
-    fig.add_hline(y=35, line_dash="dot", line_color=GOOD, opacity=0.6, row=2, col=1)
-
-    fig.update_layout(
-        height=640, template="plotly_white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(t=10, b=10, l=10, r=60), dragmode="zoom",
-        xaxis_rangeslider_visible=False,
-    )
-    fig.update_xaxes(rangebreaks=rangebreaks, row=1, col=1)
-    fig.update_xaxes(rangebreaks=rangebreaks, row=2, col=1)
-    fig.update_yaxes(title_text="Prix", row=1, col=1)
-    fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
+    fig = _build_chart(window, tiers, primary_side, price, stop, tp, badge_color, show_rsi=True, height=640)
     st.plotly_chart(
         fig, use_container_width=True, key="main_chart",
         config={"scrollZoom": False, "displaylogo": False},
     )
+
+    # -- Multi-timeframe strip: the same decision, at a glance, across
+    # every preset timeframe (not just the one selected above) --
+
+    st.subheader("Vue multi-horizons")
+    st.caption("Le même symbole, analysé sur chacun des 4 horizons -- pratique pour repérer un signal qui n'apparaît que sur certains timeframes.")
+
+    mini_cols = st.columns(2)
+    for i, (mini_label, mini_conf) in enumerate(TIMEFRAME_OPTIONS.items()):
+        with mini_cols[i % 2]:
+            if mini_label == tf_label:
+                mini_df, mini_tiers, mini_primary = df, tiers, primary_side
+                mini_price, mini_stop, mini_tp = price, stop, tp
+                mini_error = None
+            else:
+                mini_df, _, mini_error = _load_data(symbol, mini_conf, demo_mode, uploaded)
+                if not mini_error and mini_df is not None and not mini_df.empty:
+                    mini_df = DataCleaner.clean(mini_df)
+                    if len(mini_df) < max(slow, lookback) + 10:
+                        mini_error = "historique insuffisant pour ces paramètres"
+                if not mini_error:
+                    mini_tiers = _run_three_tier(mini_df, mini_conf, lookback, entry_z, exit_z, fast, slow)
+                    mini_primary = mini_tiers["primary_side"]
+                    mini_price, _, mini_stop, mini_tp = _compute_levels(mini_df, mini_primary, atr_stop_mult, atr_tp_mult, capital)
+
+            mini_badge_color = {1: GOOD, -1: CRITICAL, 0: MUTED}[mini_primary] if not mini_error else MUTED
+            mini_badge_text = {1: "ACHAT", -1: "VENTE", 0: "NEUTRE"}.get(mini_primary, "N/D") if not mini_error else "ERREUR"
+
+            st.markdown(
+                f'<div class="bb-mini-title">{mini_label} '
+                f'<span class="bb-badge-sm" style="background:{mini_badge_color};">{mini_badge_text}</span></div>',
+                unsafe_allow_html=True,
+            )
+            if mini_error:
+                st.caption(f"Indisponible : {mini_error}")
+            else:
+                mini_window = mini_df.tail(min(120, len(mini_df)))
+                mini_fig = _build_chart(
+                    mini_window, mini_tiers, mini_primary, mini_price, mini_stop, mini_tp,
+                    mini_badge_color, show_rsi=False, height=300,
+                )
+                st.plotly_chart(
+                    mini_fig, use_container_width=True, key=f"mini_chart_{i}",
+                    config={"scrollZoom": False, "displaylogo": False},
+                )
 
     # -- Advanced sections: meta-model, full backtest, raw data --
 
     if train_meta:
         with st.expander("🤖 Meta-modèle ML (Random Forest + PurgedKFold)", expanded=True):
             with st.spinner("Entraînement (validation croisée purgée)..."):
-                primary = mr_result.side[mr_result.side != 0]
+                primary = tiers["mr_result"].side[tiers["mr_result"].side != 0]
                 if len(primary) < 100:
                     st.warning("Pas assez de signaux mean-reversion sur cet historique pour entraîner le meta-modèle.")
                 else:
