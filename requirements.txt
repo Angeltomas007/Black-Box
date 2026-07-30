@@ -9,6 +9,12 @@ psycopg2-binary>=2.9
 discord.py>=2.4
 python-dotenv>=1.0
 
+# webapp/app.py (Streamlit scanner) -- kept here rather than only in
+# requirements-web.txt so hosts that auto-detect a single requirements.txt
+# (e.g. Streamlit Community Cloud) can install everything the app needs.
+streamlit>=1.38
+plotly>=5.24
+
 # Optional broker/data integrations - install as needed:
 # alpaca-py>=0.28
 # ib_insync>=0.9
