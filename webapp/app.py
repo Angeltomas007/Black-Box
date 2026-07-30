@@ -160,6 +160,61 @@ def _fetch_yfinance(symbol: str, start: str, bar_size: str) -> pd.DataFrame:
     return provider.get_historical_bars(symbol, start=start, bar_size=bar_size)
 
 
+# Yahoo's search endpoint is scraped (undocumented) and occasionally
+# rate-limits or blocks requests from hosted environments even while the
+# price-history endpoint keeps working -- when that happens, a name search
+# for "Oracle" would otherwise silently fall through to using the literal
+# text "ORACLE" as a ticker, which doesn't exist. This static map covers
+# the names people are most likely to type, so the scanner still resolves
+# them correctly even if the live search is down.
+_KNOWN_TICKERS: dict[str, tuple[str, str]] = {
+    "apple": ("AAPL", "Apple Inc."),
+    "oracle": ("ORCL", "Oracle Corporation"),
+    "microsoft": ("MSFT", "Microsoft Corporation"),
+    "amazon": ("AMZN", "Amazon.com Inc."),
+    "google": ("GOOGL", "Alphabet Inc. (Google)"),
+    "alphabet": ("GOOGL", "Alphabet Inc."),
+    "meta": ("META", "Meta Platforms Inc."),
+    "facebook": ("META", "Meta Platforms Inc."),
+    "tesla": ("TSLA", "Tesla Inc."),
+    "nvidia": ("NVDA", "NVIDIA Corporation"),
+    "broadcom": ("AVGO", "Broadcom Inc."),
+    "netflix": ("NFLX", "Netflix Inc."),
+    "intel": ("INTC", "Intel Corporation"),
+    "amd": ("AMD", "Advanced Micro Devices Inc."),
+    "coca cola": ("KO", "Coca-Cola Company"),
+    "coca-cola": ("KO", "Coca-Cola Company"),
+    "mcdonald": ("MCD", "McDonald's Corporation"),
+    "disney": ("DIS", "Walt Disney Company"),
+    "walmart": ("WMT", "Walmart Inc."),
+    "visa": ("V", "Visa Inc."),
+    "mastercard": ("MA", "Mastercard Inc."),
+    "jpmorgan": ("JPM", "JPMorgan Chase & Co."),
+    "berkshire": ("BRK-B", "Berkshire Hathaway Inc."),
+    "boeing": ("BA", "Boeing Company"),
+    "ibm": ("IBM", "IBM"),
+    "salesforce": ("CRM", "Salesforce Inc."),
+    "adobe": ("ADBE", "Adobe Inc."),
+    "paypal": ("PYPL", "PayPal Holdings Inc."),
+    "uber": ("UBER", "Uber Technologies Inc."),
+    "spotify": ("SPOT", "Spotify Technology S.A."),
+    "airbnb": ("ABNB", "Airbnb Inc."),
+    "starbucks": ("SBUX", "Starbucks Corporation"),
+    "nike": ("NKE", "Nike Inc."),
+    "pfizer": ("PFE", "Pfizer Inc."),
+    "exxon": ("XOM", "Exxon Mobil Corporation"),
+    "chevron": ("CVX", "Chevron Corporation"),
+    "goldman sachs": ("GS", "Goldman Sachs Group Inc."),
+    "ford": ("F", "Ford Motor Company"),
+    "general motors": ("GM", "General Motors Company"),
+    "qualcomm": ("QCOM", "Qualcomm Inc."),
+    "shopify": ("SHOP", "Shopify Inc."),
+    "square": ("SQ", "Block Inc."),
+    "block": ("SQ", "Block Inc."),
+    "palantir": ("PLTR", "Palantir Technologies Inc."),
+}
+
+
 @st.cache_data(show_spinner=False, ttl=300)
 def _search_symbols(query: str) -> list[dict]:
     """Resolve a company name (or partial ticker) to candidate symbols.
@@ -168,31 +223,40 @@ def _search_symbols(query: str) -> list[dict]:
     forcing users to already know the ticker is a real usability gap.
     Uses yfinance's own Search (the same client/anti-blocking layer as
     the price fetch above) rather than a raw call to Yahoo's endpoint,
-    so it works wherever the price fetch already works.
+    so it works wherever the price fetch already works. Falls back to a
+    static name map (see _KNOWN_TICKERS) if the live search comes back
+    empty or errors out.
     """
     query = query.strip()
     if len(query) < 2:
         return []
-    import yfinance as yf
 
+    results: list[dict] = []
     try:
-        quotes = yf.Search(query, max_results=8).quotes
-    except Exception:
-        return []
+        import yfinance as yf
 
-    results = []
-    for q in quotes:
-        sym = q.get("symbol")
-        if not sym:
-            continue
-        results.append(
-            {
-                "symbol": sym,
-                "name": q.get("shortname") or q.get("longname") or sym,
-                "exchange": q.get("exchange", ""),
-                "type": q.get("quoteType", ""),
-            }
-        )
+        quotes = yf.Search(query, max_results=8).quotes
+        for q in quotes:
+            sym = q.get("symbol")
+            if not sym:
+                continue
+            results.append(
+                {
+                    "symbol": sym,
+                    "name": q.get("shortname") or q.get("longname") or sym,
+                    "exchange": q.get("exchange", ""),
+                    "type": q.get("quoteType", ""),
+                }
+            )
+    except Exception:
+        pass
+
+    if not results:
+        query_lower = query.lower()
+        for name_fragment, (ticker, display_name) in _KNOWN_TICKERS.items():
+            if name_fragment in query_lower or query_lower in name_fragment:
+                results.append({"symbol": ticker, "name": display_name, "exchange": "", "type": "EQUITY"})
+
     return results
 
 
@@ -318,21 +382,25 @@ def _build_chart(
             row=1, col=1,
         )
 
+    # Labels carry only the word, not the number -- the exact entry/stop/TP
+    # prices already sit in the metric cards above the chart, so repeating
+    # them here just risked clipping against the right edge on narrower
+    # screens (and doubled up information the reader already has).
     if primary_side != 0 and stop is not None and tp is not None:
         fig.add_hline(
             y=price, line_dash="solid", line_color=badge_color, opacity=0.9, line_width=2,
-            annotation_text=f"Entrée {price:.2f}", annotation_position="right",
-            annotation_font_color=badge_color, row=1, col=1,
+            annotation_text="Entrée", annotation_position="right",
+            annotation_font=dict(color=badge_color, size=11), row=1, col=1,
         )
         fig.add_hline(
-            y=stop, line_dash="dash", line_color=CRITICAL, opacity=0.8, line_width=1.5,
-            annotation_text=f"Stop {stop:.2f}", annotation_position="right",
-            annotation_font_color=CRITICAL, row=1, col=1,
+            y=stop, line_dash="dash", line_color=CRITICAL, opacity=0.7, line_width=1.5,
+            annotation_text="Stop", annotation_position="right",
+            annotation_font=dict(color=CRITICAL, size=11), row=1, col=1,
         )
         fig.add_hline(
-            y=tp, line_dash="dash", line_color=GOOD, opacity=0.8, line_width=1.5,
-            annotation_text=f"Objectif {tp:.2f}", annotation_position="right",
-            annotation_font_color=GOOD, row=1, col=1,
+            y=tp, line_dash="dash", line_color=GOOD, opacity=0.7, line_width=1.5,
+            annotation_text="Objectif", annotation_position="right",
+            annotation_font=dict(color=GOOD, size=11), row=1, col=1,
         )
 
     if show_rsi:
@@ -341,13 +409,11 @@ def _build_chart(
             go.Scatter(x=window.index, y=rsi_series, name="RSI", showlegend=False, line=dict(color=TIER_COLORS["Price-action"], width=1.5)),
             row=2, col=1,
         )
-        fig.add_hline(y=65, line_dash="dot", line_color=CRITICAL, opacity=0.6, row=2, col=1)
-        fig.add_hline(y=35, line_dash="dot", line_color=GOOD, opacity=0.6, row=2, col=1)
 
     fig.update_layout(
         height=height, template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(t=10, b=10, l=10, r=55), dragmode="zoom",
+        margin=dict(t=10, b=10, l=10, r=64), dragmode="zoom",
     )
     if show_rsi:
         # Rangeslider goes on the bottom-most (RSI) row only -- putting
@@ -465,8 +531,9 @@ def render_scanner() -> None:
     if load_error:
         st.error(
             f"Impossible de charger **{symbol.upper()}** en direct : {load_error}\n\n"
-            "Coche **Mode démo (hors-ligne)** pour tester le scanner sans accès réseau, "
-            "ou vérifie le symbole."
+            "Vérifie l'orthographe du symbole, réessaie dans une minute (Yahoo Finance "
+            "bloque parfois temporairement les requêtes), ou coche **Mode démo "
+            "(hors-ligne)** pour tester le scanner sans dépendre du réseau."
         )
         st.stop()
 

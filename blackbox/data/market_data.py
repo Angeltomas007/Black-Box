@@ -72,6 +72,8 @@ class YFinanceProvider(MarketDataProvider):
     def get_historical_bars(
         self, symbol: str, start: str, end: str | None = None, bar_size: str = "1D"
     ) -> pd.DataFrame:
+        import time
+
         import yfinance as yf
 
         interval_map = {
@@ -82,11 +84,39 @@ class YFinanceProvider(MarketDataProvider):
             raise ValueError(f"Unsupported bar_size {bar_size!r}; expected one of {sorted(interval_map)}")
         interval = interval_map[bar_size]
         resolved_start = resolve_start_date(start)
-        raw = yf.download(
-            symbol, start=resolved_start, end=end, interval=interval, progress=False, auto_adjust=True
-        )
+
+        # Yahoo's undocumented endpoints occasionally rate-limit or blip on a
+        # single request (more common from datacenter IPs, e.g. hosted apps)
+        # -- a couple of short retries clears most of those transiently
+        # without the user ever seeing an error.
+        raw = pd.DataFrame()
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                raw = yf.download(
+                    symbol, start=resolved_start, end=end, interval=interval, progress=False, auto_adjust=True
+                )
+            except Exception as exc:  # noqa: BLE001 -- yfinance raises assorted types
+                last_error = exc
+                raw = pd.DataFrame()
+            if not raw.empty:
+                break
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+
         if raw.empty:
-            raise ValueError(f"No data returned for {symbol} between {resolved_start} and {end}")
+            # yf.download and Ticker.history hit different code paths inside
+            # yfinance; a block/hiccup on one doesn't always affect the other.
+            try:
+                raw = yf.Ticker(symbol).history(
+                    start=resolved_start, end=end, interval=interval, auto_adjust=True
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+
+        if raw.empty:
+            detail = f" -- {last_error}" if last_error else ""
+            raise ValueError(f"No data returned for {symbol} between {resolved_start} and {end}{detail}")
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
         raw = raw.rename(columns=str.lower)[OHLCV_COLUMNS]
