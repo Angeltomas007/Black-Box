@@ -432,7 +432,7 @@ def _build_chart(
 
 st.title("📈 Black-Box Scanner")
 st.caption(
-    "Cherche une action, l'analyse tourne sur la bougie d'entrée choisie (par défaut 5 min) "
+    "Cherche une action, l'analyse tourne sur la bougie d'entrée choisie (par défaut 15 min) "
     "confirmée par une tendance de plus haut niveau -- exactement le fallback "
     "mean-reversion → momentum → price-action du moteur live."
 )
@@ -446,7 +446,12 @@ with col_symbol:
         label_visibility="collapsed",
     )
 with col_tf:
-    tf_label = st.selectbox("Horizon d'analyse", list(TIMEFRAME_OPTIONS.keys()), label_visibility="collapsed")
+    # 15 min est le compromis le plus utilisé par les traders particuliers --
+    # assez réactif pour de l'intraday, sans le bruit du scalp 5 min.
+    tf_options = list(TIMEFRAME_OPTIONS.keys())
+    tf_label = st.selectbox(
+        "Horizon d'analyse", tf_options, index=tf_options.index("🔹 15 min (intraday)"), label_visibility="collapsed"
+    )
 with col_btn:
     st.button("🔍 Analyser", use_container_width=True, type="primary")
 with col_demo:
