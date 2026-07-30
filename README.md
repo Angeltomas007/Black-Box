@@ -160,6 +160,26 @@ python main.py backtest --symbol SPY --start 2018-01-01
 python main.py live
 ```
 
+## Tests
+
+Suite pytest (55 tests) couvrant : nettoyage de données et bars dollar,
+features (RSI, ATR, Bollinger, différenciation fractionnaire, filtre
+HTF sans lookahead), reconnaissance de patterns de bougies, triple
+barrière + meta-labeling, `PurgedKFold` (absence de fuite train/test),
+signaux (mean-reversion, momentum, confluence price action), risk
+manager (stop/take-profit ATR, kill-switch drawdown, plafonds
+d'exposition), sizing (Kelly, ciblage de volatilité), backtester (coûts
+de transaction, fenêtres walk-forward), exécution (`PaperBroker`,
+`OrderManager`) et intégration du moteur complet.
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+La CI (`.github/workflows/tests.yml`) exécute cette suite sur chaque
+push et pull request.
+
 ## Avertissement
 
 Ce dépôt est un **socle d'architecture et de recherche**, pas un système

@@ -154,7 +154,12 @@ class DataCleaner:
         df = df[(df[OHLCV_COLUMNS] > 0).all(axis=1)]
 
         returns = np.log(df["close"]).diff()
-        rolling_std = returns.rolling(20, min_periods=5).std()
+        # The baseline std must exclude the return under test -- a
+        # rolling window that includes its own outlier inflates its own
+        # std and can mask exactly the single-bar spike it's meant to
+        # catch (a 50x price spike can score under an 8-sigma threshold
+        # once it's allowed to dominate its own 20-bar window).
+        rolling_std = returns.rolling(20, min_periods=5).std().shift(1)
         z = (returns / rolling_std.replace(0, np.nan)).abs()
         df = df[(z < max_return_zscore) | z.isna()]
 
