@@ -449,20 +449,32 @@ def render_scanner() -> None:
 
     st.success(f"Données : {label} — {len(df)} bougies, du {df.index[0]} au {df.index[-1]}")
 
-    # -- Candlestick chart with RSI panel: kept deliberately minimal --
-    # candles, RSI, and the three price levels of the current decision.
-    # No scatter of historical markers: with hundreds of bars that
-    # turned into visual noise; the "why" already lives in the
-    # "Pourquoi cette décision ?" panel above.
+    # -- Candlestick chart with RSI panel --
 
     st.subheader("Bougies et RSI")
     st.caption(
-        "Ligne pleine = entrée, pointillé rouge = stop, pointillé vert = objectif (take-profit). "
-        "Molette pour zoomer, double-clic pour réinitialiser."
+        "▲ vert = achat, ▼ rouge = vente. Ligne pleine = entrée, pointillé rouge = stop, "
+        "pointillé vert = objectif (take-profit). Utilise les boutons +/- ou glisse-sélectionne "
+        "pour zoomer (la molette de la souris ne fait pas défiler le graphique -- elle fait "
+        "défiler la page)."
     )
 
     window = df.tail(min(200, len(df)))
     rsi_series = compute_rsi(df["close"]).reindex(window.index)
+
+    # Nights/weekends/market closures otherwise show up as flat empty
+    # gaps on a continuous time axis, squeezing the actual candles into
+    # sparse-looking clusters. Compute the gaps directly from this
+    # window's own bar spacing (works for any bar size or exchange
+    # hours, not just a hardcoded market calendar) and skip them.
+    inferred_freq = window.index.to_series().diff().median()
+    rangebreaks = []
+    if pd.notna(inferred_freq) and inferred_freq > pd.Timedelta(0):
+        full_range = pd.date_range(window.index.min(), window.index.max(), freq=inferred_freq)
+        observed = set(window.index)
+        missing = [ts for ts in full_range if ts not in observed]
+        if missing:
+            rangebreaks = [dict(values=missing)]
 
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.05,
@@ -475,6 +487,36 @@ def render_scanner() -> None:
         ),
         row=1, col=1,
     )
+
+    # Universal buy/sell arrows (green up / red down) merged across all
+    # three tiers -- which tier fired is broken out separately in the
+    # "Pourquoi cette décision ?" panel above.
+    long_ts: set = set()
+    short_ts: set = set()
+    for res in (mr_result, mom_result, pa_result):
+        side = res.side.reindex(window.index).fillna(0)
+        entered = side.diff().fillna(side)
+        long_ts.update(window.index[(side == 1) & (entered != 0)])
+        short_ts.update(window.index[(side == -1) & (entered != 0)])
+
+    longs = window.index[window.index.isin(long_ts)]
+    shorts = window.index[window.index.isin(short_ts)]
+    if len(longs):
+        fig.add_trace(
+            go.Scatter(
+                x=longs, y=window.loc[longs, "low"] * 0.985, mode="markers", name="Achat",
+                marker=dict(color=GOOD, symbol="triangle-up", size=22, line=dict(width=2, color="white")),
+            ),
+            row=1, col=1,
+        )
+    if len(shorts):
+        fig.add_trace(
+            go.Scatter(
+                x=shorts, y=window.loc[shorts, "high"] * 1.015, mode="markers", name="Vente",
+                marker=dict(color=CRITICAL, symbol="triangle-down", size=22, line=dict(width=2, color="white")),
+            ),
+            row=1, col=1,
+        )
 
     # Entry/stop/take-profit levels of the current decision -- the
     # take-profit line doubles as "the maximum level this is expected
@@ -505,15 +547,18 @@ def render_scanner() -> None:
     fig.add_hline(y=35, line_dash="dot", line_color=GOOD, opacity=0.6, row=2, col=1)
 
     fig.update_layout(
-        height=520, template="plotly_white", showlegend=False,
+        height=640, template="plotly_white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(t=10, b=10, l=10, r=60), dragmode="zoom",
         xaxis_rangeslider_visible=False,
     )
+    fig.update_xaxes(rangebreaks=rangebreaks, row=1, col=1)
+    fig.update_xaxes(rangebreaks=rangebreaks, row=2, col=1)
     fig.update_yaxes(title_text="Prix", row=1, col=1)
     fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
     st.plotly_chart(
         fig, use_container_width=True, key="main_chart",
-        config={"scrollZoom": True, "displaylogo": False},
+        config={"scrollZoom": False, "displaylogo": False},
     )
 
     # -- Advanced sections: meta-model, full backtest, raw data --
