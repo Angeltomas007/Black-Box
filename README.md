@@ -166,11 +166,13 @@ Un dashboard Streamlit (`webapp/app.py`) façon scanner : tape un
 symbole, choisis un horizon, clique **Analyser**, et obtiens une
 recommandation claire sans jamais toucher un broker.
 
-- **Recherche par action** : n'importe quel ticker yfinance (ex.
-  `ORCL`, `AAPL`, `TSLA`). Un **mode démo hors-ligne** (données
-  synthétiques) permet de tester le scanner sans accès réseau ou
-  marché fermé -- utile aussi pour l'import d'un CSV perso (`date,
-  open, high, low, close, volume`).
+- **Recherche par nom ou ticker** : tape un nom d'entreprise ("Apple",
+  "Broadcom") ou directement un ticker ("AAPL", "AVGO") -- résolu via
+  `yfinance.Search`, avec une liste de correspondances si plusieurs
+  titres matchent. Un **mode démo hors-ligne** (données synthétiques,
+  qui n'appelle pas la recherche) permet de tester le scanner sans
+  accès réseau ou marché fermé -- utile aussi pour l'import d'un CSV
+  perso (`date, open, high, low, close, volume`).
 - **Horizons d'analyse** : 5 min (scalp), 15 min (intraday), 1 heure
   (swing court) ou 1 jour (position). Chaque horizon fixe
   automatiquement la bougie d'entrée et sa confirmation de tendance sur
@@ -181,6 +183,11 @@ recommandation claire sans jamais toucher un broker.
   price-action, horizon de tenue indicatif, entrée/stop/take-profit
   ATR et ratio risque/rendement, jauge de confiance, et le détail
   "pourquoi cette décision" (quel palier a voté quoi).
+- **Bougies + RSI + actualisation automatique** : graphique en
+  chandeliers OHLC réels avec les points d'entrée de chaque signal, un
+  panneau RSI avec seuils survente/surachat, et une option
+  d'actualisation automatique (30s) qui recharge les données et
+  relance l'analyse toute seule.
 - **Paramètres avancés** (repliés par défaut) : réglages stratégie et
   risque, entraînement optionnel du meta-modèle ML (Random Forest +
   PurgedKFold) avec précision OOS et importances des features,

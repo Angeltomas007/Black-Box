@@ -65,19 +65,23 @@ st.markdown(
     }
     .bb-card {
         background: var(--bb-surface); border: 1px solid var(--bb-border);
-        border-radius: 16px; padding: 22px 28px; margin-bottom: 12px;
+        border-radius: 16px; padding: 24px 30px; margin-bottom: 16px;
         box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     }
     .bb-symbol { font-size: 1.05rem; color: var(--bb-text-secondary); font-weight: 600; letter-spacing: 0.03em; }
-    .bb-price { font-size: 2.3rem; font-weight: 700; color: var(--bb-text); }
+    .bb-price { font-size: 2.3rem; font-weight: 700; color: var(--bb-text); font-variant-numeric: tabular-nums; }
     .bb-badge {
         display: inline-flex; align-items: center; gap: 8px; font-size: 1.3rem;
         font-weight: 700; padding: 6px 20px; border-radius: 999px; color: #fff;
     }
-    .bb-sub { color: var(--bb-text-secondary); font-size: 0.95rem; margin-top: 6px; }
-    .bb-tier { text-align: center; padding: 10px 6px; }
-    .bb-tier-name { color: var(--bb-text-secondary); font-size: 0.82rem; font-weight: 600; }
-    .bb-tier-val { font-size: 1.1rem; font-weight: 700; margin-top: 2px; }
+    .bb-sub { color: var(--bb-text-secondary); font-size: 0.95rem; margin-top: 8px; }
+    .bb-tier {
+        text-align: center; padding: 14px 10px; border-radius: 12px;
+        border: 1px solid var(--bb-border); background: var(--bb-surface);
+    }
+    .bb-tier-name { color: var(--bb-text-secondary); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+    .bb-tier-val { font-size: 1.15rem; font-weight: 700; margin-top: 4px; color: var(--bb-text); }
+    .bb-section-title { margin-top: 4px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -148,6 +152,42 @@ def _fetch_yfinance(symbol: str, start: str, bar_size: str) -> pd.DataFrame:
     return provider.get_historical_bars(symbol, start=start, bar_size=bar_size)
 
 
+@st.cache_data(show_spinner=False, ttl=300)
+def _search_symbols(query: str) -> list[dict]:
+    """Resolve a company name (or partial ticker) to candidate symbols.
+
+    Names don't always resemble their ticker (Broadcom -> AVGO), so
+    forcing users to already know the ticker is a real usability gap.
+    Uses yfinance's own Search (the same client/anti-blocking layer as
+    the price fetch above) rather than a raw call to Yahoo's endpoint,
+    so it works wherever the price fetch already works.
+    """
+    query = query.strip()
+    if len(query) < 2:
+        return []
+    import yfinance as yf
+
+    try:
+        quotes = yf.Search(query, max_results=8).quotes
+    except Exception:
+        return []
+
+    results = []
+    for q in quotes:
+        sym = q.get("symbol")
+        if not sym:
+            continue
+        results.append(
+            {
+                "symbol": sym,
+                "name": q.get("shortname") or q.get("longname") or sym,
+                "exchange": q.get("exchange", ""),
+                "type": q.get("quoteType", ""),
+            }
+        )
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Header + scanner search bar (static -- lives outside the auto-refreshing
 # fragment since changing symbol/timeframe/params should always trigger a
@@ -163,7 +203,12 @@ st.caption(
 
 col_symbol, col_tf, col_btn, col_demo, col_refresh = st.columns([2.6, 2.2, 1.2, 1.5, 1.5])
 with col_symbol:
-    symbol = st.text_input("Symbole", value="ORCL", placeholder="ex : ORCL, AAPL, TSLA", label_visibility="collapsed")
+    search_query = st.text_input(
+        "Rechercher une action",
+        value="Oracle",
+        placeholder="ex : Apple, Oracle, Broadcom, ou directement AAPL",
+        label_visibility="collapsed",
+    )
 with col_tf:
     tf_label = st.selectbox("Horizon d'analyse", list(TIMEFRAME_OPTIONS.keys()), label_visibility="collapsed")
 with col_btn:
@@ -175,6 +220,34 @@ with col_refresh:
         f"🔄 Auto ({AUTO_REFRESH_SECONDS}s)",
         help="Recharge les données et relance l'analyse toutes les 30 secondes, sans re-cliquer sur Analyser.",
     )
+
+# Resolve the free-text query to a real ticker -- by name (company
+# search) if we get a confident match, falling back to treating the
+# text as a literal ticker (so "AAPL" typed directly still works even
+# offline in demo mode, where no search call is made).
+matched_name: str | None = None
+if demo_mode:
+    symbol = search_query.strip().upper()
+else:
+    matches = _search_symbols(search_query)
+    if matches:
+        options = [
+            f"{m['symbol']} — {m['name']}" + (f" ({m['exchange']})" if m["exchange"] else "")
+            for m in matches
+        ]
+        col_match, col_match_info = st.columns([2.6, 4.7])
+        with col_match:
+            chosen = st.selectbox("Résultat", options, label_visibility="collapsed", key="symbol_match")
+        picked = matches[options.index(chosen)]
+        symbol, matched_name = picked["symbol"], picked["name"]
+        with col_match_info:
+            st.caption(f"Symbole utilisé : **{symbol}** — {matched_name}")
+    else:
+        symbol = search_query.strip().upper()
+        if search_query.strip():
+            st.caption(
+                f"Aucune correspondance trouvée pour « {search_query} » -- utilisé tel quel comme symbole : **{symbol}**"
+            )
 
 tf_conf = TIMEFRAME_OPTIONS[tf_label]
 
@@ -201,6 +274,7 @@ with st.expander("⚙️ Paramètres avancés (stratégie, risque, données)"):
     st.markdown("**Import CSV** (remplace la recherche par action pour ce run)")
     uploaded = st.file_uploader("Colonnes attendues : date, open, high, low, close, volume", label_visibility="collapsed")
 
+st.divider()
 
 # ---------------------------------------------------------------------------
 # Everything below reruns on its own every AUTO_REFRESH_SECONDS when the
@@ -287,11 +361,12 @@ def render_scanner() -> None:
 
     badge_color = {1: GOOD, -1: CRITICAL, 0: MUTED}[primary_side]
     badge_text = {1: "🟢 ACHAT", -1: "🔴 VENTE À DÉCOUVERT", 0: "⚪ NEUTRE"}[primary_side]
+    header_name = f"{symbol.upper()} — {matched_name}" if matched_name else symbol.upper()
 
     st.markdown(
         f"""
-        <div class="bb-card">
-            <div class="bb-symbol">{symbol.upper()} · {last_ts.strftime('%Y-%m-%d %H:%M UTC')}</div>
+        <div class="bb-card" style="border-left: 5px solid {badge_color};">
+            <div class="bb-symbol">{header_name} · {last_ts.strftime('%Y-%m-%d %H:%M UTC')}</div>
             <div style="display:flex; align-items:baseline; gap:18px; margin:6px 0;">
                 <span class="bb-price">{price:,.2f}</span>
                 <span class="bb-badge" style="background:{badge_color};">{badge_text}</span>
