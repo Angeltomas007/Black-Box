@@ -449,97 +449,66 @@ def render_scanner() -> None:
 
     st.success(f"Données : {label} — {len(df)} bougies, du {df.index[0]} au {df.index[-1]}")
 
-    # -- Candlestick chart with RSI panel and entry markers --
+    # -- Candlestick chart with RSI panel: kept deliberately minimal --
+    # candles, RSI, and the three price levels of the current decision.
+    # No scatter of historical markers: with hundreds of bars that
+    # turned into visual noise; the "why" already lives in the
+    # "Pourquoi cette décision ?" panel above.
 
-    st.subheader("Bougies, RSI et points d'entrée")
+    st.subheader("Bougies et RSI")
     st.caption(
-        "Fenêtre récente uniquement -- ▲ vert = signal d'achat, ▼ rouge = signal de vente à découvert "
-        "(tous régimes confondus ; le détail par régime est dans \"Pourquoi cette décision ?\" ci-dessus). "
-        "Lignes horizontales : entrée/stop/take-profit de la décision actuelle. Molette ou glisser-sélectionner "
-        "pour zoomer, double-clic pour réinitialiser. Lignes pointillées RSI : survente (35) / surachat (65)."
+        "Ligne pleine = entrée, pointillé rouge = stop, pointillé vert = objectif (take-profit). "
+        "Molette pour zoomer, double-clic pour réinitialiser."
     )
 
-    window = df.tail(min(300, len(df)))
+    window = df.tail(min(200, len(df)))
     rsi_series = compute_rsi(df["close"]).reindex(window.index)
 
     fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, row_heights=[0.72, 0.28], vertical_spacing=0.04,
+        rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.05,
     )
     fig.add_trace(
         go.Candlestick(
             x=window.index, open=window["open"], high=window["high"], low=window["low"], close=window["close"],
-            name="Prix", increasing_line_color=GOOD, decreasing_line_color=CRITICAL,
+            name="Prix", showlegend=False, increasing_line_color=GOOD, decreasing_line_color=CRITICAL,
             increasing_fillcolor=GOOD, decreasing_fillcolor=CRITICAL,
         ),
         row=1, col=1,
     )
 
-    # Universal buy/sell arrows (green up / red down) merged across all
-    # three tiers -- which tier fired is already broken out in the
-    # "Pourquoi cette décision ?" panel above, so the chart itself stays
-    # readable as a plain, trading-app-style signal marker.
-    long_ts: set = set()
-    short_ts: set = set()
-    for res in (mr_result, mom_result, pa_result):
-        side = res.side.reindex(window.index).fillna(0)
-        entered = side.diff().fillna(side)
-        long_ts.update(window.index[(side == 1) & (entered != 0)])
-        short_ts.update(window.index[(side == -1) & (entered != 0)])
-
-    longs = window.index[window.index.isin(long_ts)]
-    shorts = window.index[window.index.isin(short_ts)]
-    if len(longs):
-        fig.add_trace(
-            go.Scatter(
-                x=longs, y=window.loc[longs, "low"] * 0.99, mode="markers", name="Achat",
-                marker=dict(color=GOOD, symbol="triangle-up", size=18, line=dict(width=1.5, color="white")),
-            ),
-            row=1, col=1,
-        )
-    if len(shorts):
-        fig.add_trace(
-            go.Scatter(
-                x=shorts, y=window.loc[shorts, "high"] * 1.01, mode="markers", name="Vente",
-                marker=dict(color=CRITICAL, symbol="triangle-down", size=18, line=dict(width=1.5, color="white")),
-            ),
-            row=1, col=1,
-        )
-
-    # Entry/stop/take-profit levels of the *current* decision, drawn as
-    # horizontal reference lines the way a broker chart marks open
-    # position levels.
+    # Entry/stop/take-profit levels of the current decision -- the
+    # take-profit line doubles as "the maximum level this is expected
+    # to reach" for a long, the stop as the downside boundary (mirrored
+    # for a short).
     if primary_side != 0:
         fig.add_hline(
-            y=price, line_dash="solid", line_color=badge_color, opacity=0.85, line_width=1.5,
+            y=price, line_dash="solid", line_color=badge_color, opacity=0.9, line_width=2,
             annotation_text=f"Entrée {price:.2f}", annotation_position="right",
             annotation_font_color=badge_color, row=1, col=1,
         )
         fig.add_hline(
-            y=stop, line_dash="dash", line_color=CRITICAL, opacity=0.75, line_width=1.5,
+            y=stop, line_dash="dash", line_color=CRITICAL, opacity=0.8, line_width=1.5,
             annotation_text=f"Stop {stop:.2f}", annotation_position="right",
             annotation_font_color=CRITICAL, row=1, col=1,
         )
         fig.add_hline(
-            y=tp, line_dash="dash", line_color=GOOD, opacity=0.75, line_width=1.5,
-            annotation_text=f"TP {tp:.2f}", annotation_position="right",
+            y=tp, line_dash="dash", line_color=GOOD, opacity=0.8, line_width=1.5,
+            annotation_text=f"Objectif {tp:.2f}", annotation_position="right",
             annotation_font_color=GOOD, row=1, col=1,
         )
 
     fig.add_trace(
-        go.Scatter(x=window.index, y=rsi_series, name="RSI", line=dict(color=TIER_COLORS["Price-action"], width=1.5)),
+        go.Scatter(x=window.index, y=rsi_series, name="RSI", showlegend=False, line=dict(color=TIER_COLORS["Price-action"], width=1.5)),
         row=2, col=1,
     )
     fig.add_hline(y=65, line_dash="dot", line_color=CRITICAL, opacity=0.6, row=2, col=1)
     fig.add_hline(y=35, line_dash="dot", line_color=GOOD, opacity=0.6, row=2, col=1)
 
     fig.update_layout(
-        height=680, template="plotly_white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(t=10, b=10, l=10, r=60),
-        dragmode="zoom",
+        height=520, template="plotly_white", showlegend=False,
+        margin=dict(t=10, b=10, l=10, r=60), dragmode="zoom",
+        xaxis_rangeslider_visible=False,
     )
-    fig.update_xaxes(rangeslider=dict(visible=False), row=1, col=1)
-    fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.08), row=2, col=1)
     fig.update_yaxes(title_text="Prix", row=1, col=1)
     fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
     st.plotly_chart(
