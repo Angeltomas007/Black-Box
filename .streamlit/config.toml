@@ -1,0 +1,7 @@
+# Hides Streamlit's own in-app toolbar (Deploy button, hamburger menu)
+# so the scanner reads as a standalone site rather than an obviously
+# Streamlit-branded dashboard. Doesn't affect the Community Cloud
+# owner-only chrome (Share/Manage app) -- that's the hosting
+# platform's frame, not this app's config.
+[client]
+toolbarMode = "minimal"

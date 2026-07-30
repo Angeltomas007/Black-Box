@@ -53,6 +53,10 @@ AUTO_REFRESH_SECONDS = 30
 st.markdown(
     """
     <style>
+    /* Reclaim the top space Streamlit reserves for its (now hidden,
+       see .streamlit/config.toml) toolbar, so the page reads as a
+       standalone site rather than an app shell with a dead header. */
+    .block-container { padding-top: 2.2rem; padding-bottom: 2rem; max-width: 1200px; }
     :root {
         --bb-surface: #fcfcfb; --bb-text: #0b0b0b;
         --bb-text-secondary: #52514e; --bb-border: rgba(11,11,11,0.10);
