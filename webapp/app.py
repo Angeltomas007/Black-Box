@@ -453,9 +453,10 @@ def render_scanner() -> None:
 
     st.subheader("Bougies, RSI et points d'entrée")
     st.caption(
-        "Fenêtre récente uniquement -- seuls les changements de régime (entrées) sont marqués, "
-        "la couleur identifie le signal, la forme la direction (▲ long / ▼ short). Lignes "
-        "pointillées RSI : survente (35) / surachat (65), seuils utilisés par le régime price-action."
+        "Fenêtre récente uniquement -- ▲ vert = signal d'achat, ▼ rouge = signal de vente à découvert "
+        "(tous régimes confondus ; le détail par régime est dans \"Pourquoi cette décision ?\" ci-dessus). "
+        "Lignes horizontales : entrée/stop/take-profit de la décision actuelle. Molette ou glisser-sélectionner "
+        "pour zoomer, double-clic pour réinitialiser. Lignes pointillées RSI : survente (35) / surachat (65)."
     )
 
     window = df.tail(min(300, len(df)))
@@ -473,28 +474,56 @@ def render_scanner() -> None:
         row=1, col=1,
     )
 
-    for name, res in (("Mean-reversion", mr_result), ("Momentum", mom_result), ("Price-action", pa_result)):
+    # Universal buy/sell arrows (green up / red down) merged across all
+    # three tiers -- which tier fired is already broken out in the
+    # "Pourquoi cette décision ?" panel above, so the chart itself stays
+    # readable as a plain, trading-app-style signal marker.
+    long_ts: set = set()
+    short_ts: set = set()
+    for res in (mr_result, mom_result, pa_result):
         side = res.side.reindex(window.index).fillna(0)
         entered = side.diff().fillna(side)
-        longs = window.index[(side == 1) & (entered != 0)]
-        shorts = window.index[(side == -1) & (entered != 0)]
-        color = TIER_COLORS[name]
-        if len(longs):
-            fig.add_trace(
-                go.Scatter(
-                    x=longs, y=window.loc[longs, "low"] * 0.995, mode="markers", name=f"{name} ▲",
-                    marker=dict(color=color, symbol="triangle-up", size=12, line=dict(width=1, color="rgba(0,0,0,0.3)")),
-                ),
-                row=1, col=1,
-            )
-        if len(shorts):
-            fig.add_trace(
-                go.Scatter(
-                    x=shorts, y=window.loc[shorts, "high"] * 1.005, mode="markers", name=f"{name} ▼",
-                    marker=dict(color=color, symbol="triangle-down", size=12, line=dict(width=1, color="rgba(0,0,0,0.3)")),
-                ),
-                row=1, col=1,
-            )
+        long_ts.update(window.index[(side == 1) & (entered != 0)])
+        short_ts.update(window.index[(side == -1) & (entered != 0)])
+
+    longs = window.index[window.index.isin(long_ts)]
+    shorts = window.index[window.index.isin(short_ts)]
+    if len(longs):
+        fig.add_trace(
+            go.Scatter(
+                x=longs, y=window.loc[longs, "low"] * 0.99, mode="markers", name="Achat",
+                marker=dict(color=GOOD, symbol="triangle-up", size=18, line=dict(width=1.5, color="white")),
+            ),
+            row=1, col=1,
+        )
+    if len(shorts):
+        fig.add_trace(
+            go.Scatter(
+                x=shorts, y=window.loc[shorts, "high"] * 1.01, mode="markers", name="Vente",
+                marker=dict(color=CRITICAL, symbol="triangle-down", size=18, line=dict(width=1.5, color="white")),
+            ),
+            row=1, col=1,
+        )
+
+    # Entry/stop/take-profit levels of the *current* decision, drawn as
+    # horizontal reference lines the way a broker chart marks open
+    # position levels.
+    if primary_side != 0:
+        fig.add_hline(
+            y=price, line_dash="solid", line_color=badge_color, opacity=0.85, line_width=1.5,
+            annotation_text=f"Entrée {price:.2f}", annotation_position="right",
+            annotation_font_color=badge_color, row=1, col=1,
+        )
+        fig.add_hline(
+            y=stop, line_dash="dash", line_color=CRITICAL, opacity=0.75, line_width=1.5,
+            annotation_text=f"Stop {stop:.2f}", annotation_position="right",
+            annotation_font_color=CRITICAL, row=1, col=1,
+        )
+        fig.add_hline(
+            y=tp, line_dash="dash", line_color=GOOD, opacity=0.75, line_width=1.5,
+            annotation_text=f"TP {tp:.2f}", annotation_position="right",
+            annotation_font_color=GOOD, row=1, col=1,
+        )
 
     fig.add_trace(
         go.Scatter(x=window.index, y=rsi_series, name="RSI", line=dict(color=TIER_COLORS["Price-action"], width=1.5)),
@@ -504,14 +533,19 @@ def render_scanner() -> None:
     fig.add_hline(y=35, line_dash="dot", line_color=GOOD, opacity=0.6, row=2, col=1)
 
     fig.update_layout(
-        height=620, template="plotly_white",
+        height=680, template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(t=10, b=10, l=10, r=10),
-        xaxis_rangeslider_visible=False,
+        margin=dict(t=10, b=10, l=10, r=60),
+        dragmode="zoom",
     )
+    fig.update_xaxes(rangeslider=dict(visible=False), row=1, col=1)
+    fig.update_xaxes(rangeslider=dict(visible=True, thickness=0.08), row=2, col=1)
     fig.update_yaxes(title_text="Prix", row=1, col=1)
     fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
-    st.plotly_chart(fig, use_container_width=True, key="main_chart")
+    st.plotly_chart(
+        fig, use_container_width=True, key="main_chart",
+        config={"scrollZoom": True, "displaylogo": False},
+    )
 
     # -- Advanced sections: meta-model, full backtest, raw data --
 
