@@ -85,6 +85,30 @@ ou de risque.
   plus embargo — AFML ch.7) et `MetaLabelingModel` (Random Forest)
   produisant une **probabilité de confiance** utilisée pour le
   dimensionnement, pas pour remplacer le signal primaire.
+- `candles.py` + `PriceActionConfluenceSignal` (dans `signals.py`) :
+  troisième régime, en repli quand mean-reversion et momentum sont
+  silencieux — filtre de tendance multi-timeframe **calculé par
+  resampling réel de la même série** (pas une série simulée
+  indépendamment) et décalé d'une bougie HTF pour ne référencer que des
+  bougies déjà clôturées (`features.higher_timeframe_trend`), croisé
+  avec une extrémité RSI/Bollinger et un pattern de bougie confirmant
+  (doji, engulfing). Le score de confluence est **continu** (construit
+  à partir de la profondeur RSI/BB au-delà du seuil), pas une constante
+  arbitraire.
+
+  > Ce module corrige un template externe qui simulait ses données
+  > (`np.random`), calculait un filtre "multi-timeframe" à partir de
+  > deux séries indépendamment simulées avec le même seed (donc sans
+  > lien réel avec le sous-jacent tradé), affichait un score de
+  > confiance codé en dur, et — en l'absence de signal — dispatchait un
+  > trade fictif indiscernable d'une alerte réelle sur le même canal
+  > Discord. La version Pine Script associée souffrait en plus d'un
+  > repaint classique sur son filtre MTF (`request.security` sans
+  > référence à la bougie HTF confirmée) et d'un sizing fixe déconnecté
+  > de la distance du stop. Voir `examples/demo_confluence_alert.py`
+  > (données réelles, aucun signal fictif dispatché) et
+  > `pine/institutional_confluence_strategy.pine` (MTF non-repeint,
+  > coûts modélisés, sizing basé sur le risque).
 
 ### Module 3 — Gestion des Risques (`blackbox/risk/`)
 - `position_sizing.py` : sizing par ciblage de volatilité (exposition
@@ -92,8 +116,10 @@ ou de risque.
   fractionnaire plafonné** (demi-Kelly par défaut), modulé par la
   probabilité de confiance du meta-modèle.
 - `risk_manager.py` :
-  - Stop-loss **dynamique basé sur l'ATR** (plus large en régime
-    volatil, Chan ch.3).
+  - Stop-loss et take-profit **dynamiques basés sur l'ATR** (plus
+    larges en régime volatil, Chan ch.3), calculés symétriquement à
+    partir de la même estimation de volatilité — pas de cible fixe en
+    pips/pourcentage déconnectée du régime courant.
   - Limites de **drawdown journalier et total** déclenchant un
     **kill-switch** automatique (flatten immédiat + alerte Discord).
   - Plafond de levier brut et de taille maximale par position,

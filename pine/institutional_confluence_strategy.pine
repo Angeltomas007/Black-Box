@@ -1,0 +1,87 @@
+//@version=5
+// Corrected version of the original confluence template. Fixes applied
+// relative to the first draft:
+//   1. HTF trend filter no longer repaints: the security() call
+//      explicitly references the prior *closed* higher-timeframe bar
+//      (see the `[1]` inside the expression) with lookahead disabled,
+//      instead of reading the currently-forming HTF bar.
+//   2. Entries only evaluate on a confirmed (closed) bar
+//      (barstate.isconfirmed), so the signal can't flicker intrabar
+//      between the chart and a live/paper execution.
+//   3. Commission and slippage are modeled in the strategy() call
+//      instead of assuming frictionless fills.
+//   4. Position size is derived from a risk-per-trade percentage
+//      divided by the ATR-based stop distance, instead of a fixed
+//      percent-of-equity that ignored how wide the stop was.
+strategy(
+     "Institutional Confluence Strategy (corrected)",
+     overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.cash,
+     default_qty_value=0,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     slippage=2)
+
+// ---- Inputs ----------------------------------------------------------
+rsi_length      = input.int(14, title="RSI Length")
+rsi_oversold    = input.float(35.0, title="RSI Oversold")
+rsi_overbought  = input.float(65.0, title="RSI Overbought")
+bb_length       = input.int(20, title="Bollinger Bands Length")
+bb_mult         = input.float(2.0, title="Bollinger Bands StdDev")
+atr_length      = input.int(14, title="ATR Length")
+risk_mult       = input.float(1.5, title="Stop distance (x ATR)")
+reward_mult     = input.float(3.0, title="Take-profit distance (x ATR)")
+risk_pct        = input.float(0.5, title="Risk per trade (% of equity)", minval=0.01, maxval=5.0) / 100
+htf             = input.timeframe("60", title="Higher timeframe (trend filter)")
+
+// ---- Indicators --------------------------------------------------------
+src        = close
+rsi_value  = ta.rsi(src, rsi_length)
+[bb_upper, bb_middle, bb_lower] = ta.bb(src, bb_length, bb_mult)
+atr_value  = ta.atr(atr_length)
+
+// ---- HTF trend filter, non-repainting -----------------------------------
+// Requesting `ta.sma(close, 20)[1]` -- the prior *closed* HTF bar's
+// value -- rather than the live/forming HTF bar. Combined with
+// lookahead_off, this returns the same value on a historical bar and
+// on the live, still-forming current bar: no repaint in either
+// direction.
+htf_sma_prev  = request.security(syminfo.tickerid, htf, ta.sma(close, 20)[1], lookahead=barmerge.lookahead_off)
+htf_close_prev = request.security(syminfo.tickerid, htf, close[1], lookahead=barmerge.lookahead_off)
+trend_bullish = htf_close_prev > htf_sma_prev
+trend_bearish = htf_close_prev < htf_sma_prev
+
+// ---- Price action (Nison-style engulfing) --------------------------------
+bullish_engulfing = (close > open) and (close[1] < open[1]) and (close >= open[1]) and (open <= close[1])
+bearish_engulfing = (close < open) and (close[1] > open[1]) and (close <= open[1]) and (open >= close[1])
+
+// ---- Confluence, evaluated only on a confirmed bar ------------------------
+long_condition  = barstate.isconfirmed and trend_bullish and (rsi_value < rsi_oversold or low <= bb_lower) and bullish_engulfing
+short_condition = barstate.isconfirmed and trend_bearish and (rsi_value > rsi_overbought or high >= bb_upper) and bearish_engulfing
+
+// ---- Risk-based position sizing -----------------------------------------
+// Quantity is derived from "risk_pct of equity" / "stop distance in
+// price", so every trade risks the same dollar amount regardless of
+// how wide the ATR-based stop happens to be that day.
+stop_distance = atr_value * risk_mult
+equity        = strategy.equity
+qty           = stop_distance > 0 ? (equity * risk_pct) / stop_distance : 0.0
+
+if (long_condition and strategy.position_size <= 0)
+    long_sl = close - stop_distance
+    long_tp = close + (atr_value * reward_mult)
+    strategy.entry("Long", strategy.long, qty=qty)
+    strategy.exit("Exit Long", "Long", stop=long_sl, limit=long_tp)
+
+if (short_condition and strategy.position_size >= 0)
+    short_sl = close + stop_distance
+    short_tp = close - (atr_value * reward_mult)
+    strategy.entry("Short", strategy.short, qty=qty)
+    strategy.exit("Exit Short", "Short", stop=short_sl, limit=short_tp)
+
+// ---- Plots ---------------------------------------------------------------
+plot(bb_upper, color=color.blue, title="BB Upper")
+plot(bb_lower, color=color.blue, title="BB Lower")
+plot(bb_middle, color=color.orange, title="BB Middle")
+plot(htf_sma_prev, color=color.purple, title="HTF SMA (prior closed bar)")

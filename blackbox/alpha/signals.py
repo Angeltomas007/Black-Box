@@ -14,7 +14,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from blackbox.alpha.features import rolling_zscore
+from blackbox.alpha.candles import detect_patterns
+from blackbox.alpha.features import bollinger_bands, higher_timeframe_trend, rolling_zscore, rsi
 
 
 @dataclass(frozen=True)
@@ -86,3 +87,83 @@ class MomentumSignal:
         side[spread < 0] = -1
 
         return SignalResult(side=side, strength=spread.abs())
+
+
+class PriceActionConfluenceSignal:
+    """Multi-factor confluence: a higher-timeframe trend filter, an
+    RSI/Bollinger extremity, and a confirming candlestick pattern
+    (Nison-style price action) must all agree before a side is emitted.
+
+    Every input is computed from the same OHLCV series -- the HTF
+    trend is a real resample of ``df``, shifted to only reference
+    closed higher-timeframe bars (see
+    ``features.higher_timeframe_trend``) -- so there is no possibility
+    of the HTF filter being an artifact of an independently-simulated
+    series, and no lookahead into an unclosed bar.
+
+    ``strength`` is a continuous confluence score in [0, 1] built from
+    how far price sits into oversold/overbought territory, not a fixed
+    constant: three trades that all technically qualify are not
+    equally convincing, and the risk layer's confidence-scaled sizing
+    needs a real gradient to act on.
+    """
+
+    def __init__(
+        self,
+        htf_rule: str = "15min",
+        rsi_window: int = 14,
+        bb_window: int = 20,
+        bb_std: float = 2.0,
+        rsi_oversold: float = 35.0,
+        rsi_overbought: float = 65.0,
+    ):
+        self.htf_rule = htf_rule
+        self.rsi_window = rsi_window
+        self.bb_window = bb_window
+        self.bb_std = bb_std
+        self.rsi_oversold = rsi_oversold
+        self.rsi_overbought = rsi_overbought
+
+    def generate(self, df: pd.DataFrame) -> SignalResult:
+        close = df["close"]
+        trend = higher_timeframe_trend(df, self.htf_rule)
+        rsi_values = rsi(close, self.rsi_window)
+        upper, _, lower = bollinger_bands(close, self.bb_window, self.bb_std)
+        patterns = detect_patterns(df)
+
+        rsi_oversold_cond = rsi_values < self.rsi_oversold
+        touch_lower = close <= lower
+        rsi_overbought_cond = rsi_values > self.rsi_overbought
+        touch_upper = close >= upper
+
+        bullish_pattern = patterns["is_bullish_engulfing"] | patterns["is_doji"]
+        bearish_pattern = patterns["is_bearish_engulfing"] | patterns["is_doji"]
+
+        long_cond = (trend > 0) & (rsi_oversold_cond | touch_lower) & bullish_pattern
+        short_cond = (trend < 0) & (rsi_overbought_cond | touch_upper) & bearish_pattern
+
+        side = pd.Series(0, index=close.index)
+        side[long_cond.fillna(False)] = 1
+        side[short_cond.fillna(False)] = -1
+
+        rsi_extremity_long = ((self.rsi_oversold - rsi_values) / self.rsi_oversold).clip(lower=0)
+        rsi_extremity_short = (
+            (rsi_values - self.rsi_overbought) / (100 - self.rsi_overbought)
+        ).clip(lower=0)
+        bb_depth_long = ((lower - close) / lower.replace(0, np.nan)).clip(lower=0)
+        bb_depth_short = ((close - upper) / upper.replace(0, np.nan)).clip(lower=0)
+
+        strength = pd.Series(0.0, index=close.index)
+        base_confidence = 0.5  # all three gating conditions already agreed
+        strength[long_cond.fillna(False)] = (
+            base_confidence
+            + 0.25 * rsi_extremity_long[long_cond.fillna(False)].fillna(0)
+            + 0.25 * bb_depth_long[long_cond.fillna(False)].fillna(0)
+        ).clip(upper=1.0)
+        strength[short_cond.fillna(False)] = (
+            base_confidence
+            + 0.25 * rsi_extremity_short[short_cond.fillna(False)].fillna(0)
+            + 0.25 * bb_depth_short[short_cond.fillna(False)].fillna(0)
+        ).clip(upper=1.0)
+
+        return SignalResult(side=side, strength=strength)

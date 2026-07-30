@@ -19,6 +19,7 @@ class RiskLimits:
     max_position_pct: float = 0.20
     max_gross_leverage: float = 2.0
     atr_stop_multiple: float = 2.5
+    atr_tp_multiple: float = 5.0
     max_daily_drawdown: float = 0.03
     max_total_drawdown: float = 0.15
     risk_per_trade: float = 0.0025
@@ -31,6 +32,7 @@ class PositionState:
     quantity: float
     entry_price: float
     stop_price: float
+    take_profit_price: float | None = None
 
 
 class RiskManager:
@@ -95,6 +97,21 @@ class RiskManager:
             return current_price <= pos.stop_price
         return current_price >= pos.stop_price
 
+    def compute_take_profit_price(self, entry_price: float, atr: float, side: int) -> float:
+        """ATR-based take-profit, symmetric to the stop: the reward
+        leg of the risk/reward ratio, sized off the same volatility
+        estimate rather than a fixed pip/percent target."""
+        offset = self.limits.atr_tp_multiple * atr
+        return entry_price + offset if side > 0 else entry_price - offset
+
+    def check_take_profit_triggered(self, symbol: str, current_price: float) -> bool:
+        pos = self.positions.get(symbol)
+        if pos is None or pos.side == 0 or pos.take_profit_price is None:
+            return False
+        if pos.side > 0:
+            return current_price >= pos.take_profit_price
+        return current_price <= pos.take_profit_price
+
     # -- Order-level risk checks -------------------------------------------------
 
     def clip_order_size(
@@ -121,8 +138,14 @@ class RiskManager:
         self, symbol: str, side: int, quantity: float, price: float, atr: float
     ) -> None:
         stop = self.compute_stop_price(price, atr, side)
+        take_profit = self.compute_take_profit_price(price, atr, side)
         self.positions[symbol] = PositionState(
-            symbol=symbol, side=side, quantity=quantity, entry_price=price, stop_price=stop
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            entry_price=price,
+            stop_price=stop,
+            take_profit_price=take_profit,
         )
 
     def close_position(self, symbol: str) -> None:

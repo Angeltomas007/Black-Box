@@ -47,6 +47,39 @@ def realized_volatility(close: pd.Series, window: int = 20, annualize: bool = Tr
     return vol * np.sqrt(252) if annualize else vol
 
 
+def bollinger_bands(
+    close: pd.Series, window: int = 20, num_std: float = 2.0
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    middle = close.rolling(window).mean()
+    std = close.rolling(window).std()
+    upper = middle + num_std * std
+    lower = middle - num_std * std
+    return upper, middle, lower
+
+
+def higher_timeframe_trend(df: pd.DataFrame, rule: str, sma_window: int = 20) -> pd.Series:
+    """Resample ``df`` to a higher timeframe (e.g. "15min") and compute
+    a trend filter (close vs SMA) on *fully closed* HTF bars only, then
+    project it back onto ``df``'s index.
+
+    Two lookahead traps this avoids, both present in the naive
+    "request higher timeframe close" pattern:
+      1. Resampling from the *same* underlying series (not an
+         independently-fetched/simulated series) so the HTF bars are
+         actually derived from the LTF data being traded.
+      2. Shifting the resampled trend by one HTF bar before
+         reindexing, so a bar's trend value only reflects HTF bars that
+         had already closed by that timestamp -- the equivalent of
+         Pine's ``lookahead=barmerge.lookahead_off``.
+    """
+    htf = df.resample(rule).agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    ).dropna()
+    htf_sma = htf["close"].rolling(sma_window).mean()
+    htf_trend = np.sign(htf["close"] - htf_sma).shift(1)
+    return htf_trend.reindex(df.index, method="ffill")
+
+
 def build_feature_matrix(df: pd.DataFrame, lookback: int = 60, frac_diff_d: float = 0.4) -> pd.DataFrame:
     """Assemble the full feature set used to train the meta-labeling
     classifier. ``df`` must contain OHLCV columns indexed by timestamp."""

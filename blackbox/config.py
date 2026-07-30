@@ -54,6 +54,7 @@ class RiskConfig:
     max_position_pct: float = _float("MAX_POSITION_PCT", 0.20)
     max_gross_leverage: float = _float("MAX_GROSS_LEVERAGE", 2.0)
     atr_stop_multiple: float = _float("ATR_STOP_MULTIPLE", 2.5)
+    atr_tp_multiple: float = _float("ATR_TP_MULTIPLE", 5.0)  # ~2:1 reward/risk at default stop
     max_daily_drawdown: float = _float("MAX_DAILY_DRAWDOWN", 0.03)
     max_total_drawdown: float = _float("MAX_TOTAL_DRAWDOWN", 0.15)
     kelly_cap: float = _float("KELLY_CAP", 0.5)  # half-Kelly

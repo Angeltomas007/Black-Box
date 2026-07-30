@@ -15,7 +15,7 @@ import pandas as pd
 from blackbox.alpha.features import average_true_range, build_feature_matrix, realized_volatility
 from blackbox.alpha.labeling import apply_triple_barrier, meta_label
 from blackbox.alpha.model import MetaLabelingModel
-from blackbox.alpha.signals import MeanReversionSignal, MomentumSignal
+from blackbox.alpha.signals import MeanReversionSignal, MomentumSignal, PriceActionConfluenceSignal
 from blackbox.config import EngineConfig
 from blackbox.data.bars import get_daily_vol
 from blackbox.data.market_data import MarketDataProvider
@@ -27,6 +27,18 @@ from blackbox.risk.position_sizing import confidence_scaled_size
 from blackbox.risk.risk_manager import RiskLimits, RiskManager
 
 logger = logging.getLogger(__name__)
+
+# Maps a primary bar size to a coarser confirmation timeframe for the
+# price-action confluence signal's HTF trend filter. Resampling to a
+# rule *finer* than the source bar size silently produces a mostly-NaN
+# series, so this must always point to something strictly coarser.
+_HTF_TREND_MAP = {
+    "1min": "15min",
+    "5min": "30min",
+    "15min": "1h",
+    "1H": "4h",
+    "1D": "1W",
+}
 
 
 class TradingEngine:
@@ -52,6 +64,9 @@ class TradingEngine:
             exit_z=config.alpha.zscore_exit,
         )
         self.momentum = MomentumSignal()
+        self.price_action = PriceActionConfluenceSignal(
+            htf_rule=_HTF_TREND_MAP.get(config.data.bar_size, "1D")
+        )
         self.meta_models: dict[str, MetaLabelingModel] = {}
 
         account = broker.get_account()
@@ -106,10 +121,24 @@ class TradingEngine:
 
         mr_signal = self.mean_reversion.generate(history)
         mom_signal = self.momentum.generate(history)
+        pa_signal = self.price_action.generate(history)
 
         last_mr_side = int(mr_signal.side.iloc[-1])
         last_mom_side = int(mom_signal.side.iloc[-1])
-        primary_side = last_mr_side if last_mr_side != 0 else last_mom_side
+        last_pa_side = int(pa_signal.side.iloc[-1])
+        pa_strength = float(pa_signal.strength.iloc[-1])
+
+        # Three complementary regimes, tried in order: statistical mean
+        # reversion, trend-following momentum, and price-action
+        # confluence as a tertiary fallback when the first two are
+        # silent (Narang ch.4 on running complementary regimes rather
+        # than picking one permanently).
+        if last_mr_side != 0:
+            primary_side = last_mr_side
+        elif last_mom_side != 0:
+            primary_side = last_mom_side
+        else:
+            primary_side = last_pa_side
 
         price = float(history["close"].iloc[-1])
         atr = float(average_true_range(history).iloc[-1])
@@ -128,6 +157,10 @@ class TradingEngine:
                 confidence = float(model.predict_confidence(latest_features).iloc[-1])
             except Exception:
                 logger.exception("Meta-model inference failed for %s; using neutral confidence", symbol)
+        elif primary_side != 0 and primary_side == last_pa_side and last_mr_side == 0 and last_mom_side == 0:
+            # No trained meta-model backs the price-action tier; use its
+            # own continuous confluence score rather than a flat prior.
+            confidence = pa_strength
 
         target_quantity = 0.0
         if primary_side != 0 and confidence >= self.config.alpha.meta_label_min_proba:
@@ -146,6 +179,9 @@ class TradingEngine:
 
         if self.risk_manager.check_stop_triggered(symbol, price):
             logger.info("Stop-loss triggered for %s at %.4f", symbol, price)
+            target_quantity = 0.0
+        elif self.risk_manager.check_take_profit_triggered(symbol, price):
+            logger.info("Take-profit triggered for %s at %.4f", symbol, price)
             target_quantity = 0.0
 
         current_positions = self.broker.get_positions()
