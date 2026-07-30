@@ -294,30 +294,26 @@ def _build_chart(
         row=1, col=1,
     )
 
-    long_ts: set = set()
-    short_ts: set = set()
-    for res in (tiers["mr_result"], tiers["mom_result"], tiers["pa_result"]):
-        side = res.side.reindex(window.index).fillna(0)
-        entered = side.diff().fillna(side)
-        long_ts.update(window.index[(side == 1) & (entered != 0)])
-        short_ts.update(window.index[(side == -1) & (entered != 0)])
-
-    longs = window.index[window.index.isin(long_ts)]
-    shorts = window.index[window.index.isin(short_ts)]
-    marker_size = 22 if show_rsi else 14
-    if len(longs):
+    # Only the CURRENT signal gets a marker -- one big, unambiguous arrow on
+    # the last bar, not a triangle on every historical flip of the three
+    # tiers. Marking every past crossover is what made the chart read as
+    # cluttered noise instead of "here is today's call," which a real
+    # broker app never shows either.
+    marker_size = 30 if show_rsi else 18
+    last_ts = window.index[-1:]
+    if primary_side == 1:
         fig.add_trace(
             go.Scatter(
-                x=longs, y=window.loc[longs, "low"] * 0.985, mode="markers", name="Achat",
-                marker=dict(color=GOOD, symbol="triangle-up", size=marker_size, line=dict(width=1.5, color="white")),
+                x=last_ts, y=[window["low"].iloc[-1] * 0.98], mode="markers", name="Achat",
+                marker=dict(color=GOOD, symbol="triangle-up", size=marker_size, line=dict(width=2, color="white")),
             ),
             row=1, col=1,
         )
-    if len(shorts):
+    elif primary_side == -1:
         fig.add_trace(
             go.Scatter(
-                x=shorts, y=window.loc[shorts, "high"] * 1.015, mode="markers", name="Vente",
-                marker=dict(color=CRITICAL, symbol="triangle-down", size=marker_size, line=dict(width=1.5, color="white")),
+                x=last_ts, y=[window["high"].iloc[-1] * 1.02], mode="markers", name="Vente",
+                marker=dict(color=CRITICAL, symbol="triangle-down", size=marker_size, line=dict(width=2, color="white")),
             ),
             row=1, col=1,
         )
@@ -584,11 +580,12 @@ def render_scanner() -> None:
 
     st.subheader("Bougies et RSI")
     st.caption(
-        "▲ vert = achat, ▼ rouge = vente. Ligne pleine = entrée, pointillé rouge = stop, "
-        "pointillé vert = objectif (take-profit). Boutons +/- ou glisser-sélectionner pour "
-        "zoomer le temps, curseur sous le graphique pour naviguer, glisser directement sur "
-        "les prix à droite pour zoomer l'échelle -- la molette ne fait pas défiler le "
-        "graphique, elle fait défiler la page."
+        "▲ vert / ▼ rouge = le signal actuel (achat ou vente), affiché une seule fois sur "
+        "la dernière bougie -- pas un historique de tous les signaux passés. Ligne pleine = "
+        "entrée, pointillé rouge = stop, pointillé vert = objectif (take-profit). Boutons "
+        "+/- ou glisser-sélectionner pour zoomer le temps, curseur sous le graphique pour "
+        "naviguer, glisser directement sur les prix à droite pour zoomer l'échelle -- la "
+        "molette ne fait pas défiler le graphique, elle fait défiler la page."
     )
 
     window = df.tail(min(200, len(df)))
