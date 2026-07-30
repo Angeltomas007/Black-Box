@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import numpy as np
 import pandas as pd
 
 from blackbox.data.bars import fractional_diff, get_daily_vol, to_dollar_bars
-from blackbox.data.market_data import DataCleaner
+from blackbox.data.market_data import DataCleaner, resolve_start_date
 
 
 def test_data_cleaner_drops_bad_return_outliers(random_walk_df):
@@ -51,3 +53,20 @@ def test_to_dollar_bars_aggregates_by_notional_threshold():
     assert 18 <= len(bars) <= 21
     assert {"open", "high", "low", "close", "volume"}.issubset(bars.columns)
     assert bars["volume"].sum() == ticks["size"].sum()
+
+
+def test_resolve_start_date_converts_relative_string():
+    resolved = resolve_start_date("10d ago")
+    expected = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y-%m-%d")
+    assert resolved == expected
+
+
+def test_resolve_start_date_handles_various_spacing_and_case():
+    assert resolve_start_date("5 D AGO") == resolve_start_date("5d ago")
+    assert resolve_start_date("500d ago") == (
+        datetime.now(timezone.utc) - timedelta(days=500)
+    ).strftime("%Y-%m-%d")
+
+
+def test_resolve_start_date_passes_through_real_dates_unchanged():
+    assert resolve_start_date("2018-01-01") == "2018-01-01"

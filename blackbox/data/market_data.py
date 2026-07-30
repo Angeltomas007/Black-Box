@@ -8,7 +8,9 @@ from __future__ import annotations
 import abc
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
 import numpy as np
@@ -17,6 +19,23 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
+
+_RELATIVE_START_RE = re.compile(r"^\s*(\d+)\s*d\s*ago\s*$", re.IGNORECASE)
+
+
+def resolve_start_date(start: str) -> str:
+    """Convert a "<N>d ago" convenience string into an actual
+    "YYYY-MM-DD" date. yfinance's start= parameter only accepts real
+    dates (or datetime objects) -- passing it the literal string
+    "10d ago" doesn't raise, it just silently matches no rows, which
+    surfaces downstream as a confusing "No data returned" error. Any
+    string that isn't of this relative form is passed through
+    unchanged (e.g. an already-real "2018-01-01")."""
+    match = _RELATIVE_START_RE.match(start)
+    if not match:
+        return start
+    days = int(match.group(1))
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
 
 
 @dataclass(frozen=True)
@@ -62,11 +81,12 @@ class YFinanceProvider(MarketDataProvider):
         if bar_size not in interval_map:
             raise ValueError(f"Unsupported bar_size {bar_size!r}; expected one of {sorted(interval_map)}")
         interval = interval_map[bar_size]
+        resolved_start = resolve_start_date(start)
         raw = yf.download(
-            symbol, start=start, end=end, interval=interval, progress=False, auto_adjust=True
+            symbol, start=resolved_start, end=end, interval=interval, progress=False, auto_adjust=True
         )
         if raw.empty:
-            raise ValueError(f"No data returned for {symbol} between {start} and {end}")
+            raise ValueError(f"No data returned for {symbol} between {resolved_start} and {end}")
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.get_level_values(0)
         raw = raw.rename(columns=str.lower)[OHLCV_COLUMNS]
@@ -105,13 +125,19 @@ class AlpacaDataProvider(MarketDataProvider):
         self, symbol: str, start: str, end: str | None = None, bar_size: str = "1D"
     ) -> pd.DataFrame:
         from alpaca.data.requests import StockBarsRequest
-        from alpaca.data.timeframe import TimeFrame
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-        timeframe_map = {"1D": TimeFrame.Day, "1H": TimeFrame.Hour, "1min": TimeFrame.Minute}
+        timeframe_map = {
+            "1D": TimeFrame.Day, "1H": TimeFrame.Hour, "1min": TimeFrame.Minute,
+            "5min": TimeFrame(5, TimeFrameUnit.Minute), "15min": TimeFrame(15, TimeFrameUnit.Minute),
+            "30min": TimeFrame(30, TimeFrameUnit.Minute),
+        }
+        if bar_size not in timeframe_map:
+            raise ValueError(f"Unsupported bar_size {bar_size!r}; expected one of {sorted(timeframe_map)}")
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
-            timeframe=timeframe_map.get(bar_size, TimeFrame.Day),
-            start=start,
+            timeframe=timeframe_map[bar_size],
+            start=resolve_start_date(start),
             end=end,
         )
         bars = self._client.get_stock_bars(req).df
