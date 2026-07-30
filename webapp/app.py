@@ -1,8 +1,13 @@
-"""Interactive test site for the black box: pick a symbol (or upload
-your own OHLCV data), tune the strategy/risk parameters in the
-sidebar, and see exactly what the engine would do -- the three-tier
-signal fallback, the ATR stop/take-profit it would set, and a full
-cost-aware backtest -- without touching a broker.
+"""Black-Box Scanner: type a ticker, pick a timeframe, and get a clear
+recommendation card (buy / sell / flat, with an ATR stop/take-profit
+and a suggested holding horizon) built from the same three-tier signal
+fallback the live engine uses -- mean-reversion, then momentum, then
+price-action confluence.
+
+Advanced controls (strategy/risk parameters, offline synthetic data,
+CSV import, the detailed backtest, and the ML meta-model) live in
+collapsed sections below the scanner so the default experience stays a
+one-line search.
 
 Run with:
     pip install -r requirements-web.txt
@@ -30,25 +35,81 @@ from blackbox.data.bars import get_daily_vol
 from blackbox.data.market_data import DataCleaner, YFinanceProvider
 from blackbox.risk.risk_manager import RiskLimits, RiskManager
 
-st.set_page_config(page_title="Black-Box - Site de test", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Black-Box Scanner", layout="wide", page_icon="📈")
+
+# ---------------------------------------------------------------------------
+# Style -- validated palette (dataviz skill): status colors for the
+# recommendation badge, categorical slots 1/2/3 (blue/orange/aqua) for
+# the three signal tiers in the chart, both cleared for CVD-safety as a
+# set. Surfaces/ink follow the light/dark reference pairs verbatim.
+# ---------------------------------------------------------------------------
+
+GOOD, CRITICAL, MUTED = "#0ca30c", "#d03b3b", "#898781"
+TIER_COLORS = {"Mean-reversion": "#2a78d6", "Momentum": "#eb6834", "Price-action": "#1baf7a"}
+
+st.markdown(
+    """
+    <style>
+    :root {
+        --bb-surface: #fcfcfb; --bb-text: #0b0b0b;
+        --bb-text-secondary: #52514e; --bb-border: rgba(11,11,11,0.10);
+    }
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bb-surface: #1a1a19; --bb-text: #ffffff;
+            --bb-text-secondary: #c3c2b7; --bb-border: rgba(255,255,255,0.10);
+        }
+    }
+    .bb-card {
+        background: var(--bb-surface); border: 1px solid var(--bb-border);
+        border-radius: 16px; padding: 22px 28px; margin-bottom: 12px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+    .bb-symbol { font-size: 1.05rem; color: var(--bb-text-secondary); font-weight: 600; letter-spacing: 0.03em; }
+    .bb-price { font-size: 2.3rem; font-weight: 700; color: var(--bb-text); }
+    .bb-badge {
+        display: inline-flex; align-items: center; gap: 8px; font-size: 1.3rem;
+        font-weight: 700; padding: 6px 20px; border-radius: 999px; color: #fff;
+    }
+    .bb-sub { color: var(--bb-text-secondary); font-size: 0.95rem; margin-top: 6px; }
+    .bb-tier { text-align: center; padding: 10px 6px; }
+    .bb-tier-name { color: var(--bb-text-secondary); font-size: 0.82rem; font-weight: 600; }
+    .bb-tier-val { font-size: 1.1rem; font-weight: 700; margin-top: 2px; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ---------------------------------------------------------------------------
+# Timeframe presets -- entry timeframe + a strictly coarser confirmation
+# timeframe, mirroring blackbox.core.engine's _HTF_TREND_MAP mapping so
+# the scanner matches what the live engine would actually compute.
+# ---------------------------------------------------------------------------
+
+TIMEFRAME_OPTIONS: dict[str, dict[str, str]] = {
+    "⚡ 5 min (scalp)": dict(bar_size="5min", htf_rule="30min", start="10d ago", horizon="15 à 30 minutes (~3-6 bougies)"),
+    "🔹 15 min (intraday)": dict(bar_size="15min", htf_rule="1h", start="30d ago", horizon="45 à 90 minutes (~3-6 bougies)"),
+    "🔸 1 heure (swing court)": dict(bar_size="1H", htf_rule="1D", start="90d ago", horizon="3 à 6 heures"),
+    "📅 1 jour (position)": dict(bar_size="1D", htf_rule="1W", start="500d ago", horizon="3 à 6 jours"),
+}
 
 
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
-def _generate_synthetic_ohlcv(n: int, regime: str, seed: int) -> pd.DataFrame:
-    idx = pd.date_range("2023-01-01", periods=n, freq="1h", tz="UTC")
+def _generate_synthetic_ohlcv(n: int, freq: str, regime: str, seed: int) -> pd.DataFrame:
+    idx = pd.date_range("2024-01-01", periods=n, freq=freq, tz="UTC")
     rng = np.random.default_rng(seed)
 
-    if regime == "Mean-reverting (Ornstein-Uhlenbeck)":
+    if regime == "mean_reverting":
         theta, mu, sigma = 0.15, 100.0, 0.5
         close = np.full(n, mu)
         for i in range(1, n):
             close[i] = close[i - 1] + theta * (mu - close[i - 1]) + sigma * rng.normal()
-    elif regime == "Tendance":
+    elif regime == "trending":
         close = 100 + np.arange(n) * 0.05 + rng.normal(0, 0.5, n)
-    else:  # random walk
+    else:
         close = 100 + np.cumsum(rng.normal(0, 1, n))
 
     df = pd.DataFrame(
@@ -78,181 +139,273 @@ def _load_csv(uploaded_file) -> pd.DataFrame:
     return raw[["open", "high", "low", "close", "volume"]]
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60)
 def _fetch_yfinance(symbol: str, start: str, bar_size: str) -> pd.DataFrame:
     provider = YFinanceProvider()
     return provider.get_historical_bars(symbol, start=start, bar_size=bar_size)
 
 
 # ---------------------------------------------------------------------------
-# Sidebar controls
+# Header + scanner search bar
 # ---------------------------------------------------------------------------
 
-st.sidebar.header("Source de données")
-source = st.sidebar.radio(
-    "Origine des données",
-    ["Données synthétiques (démo)", "Données réelles (yfinance)", "Importer un CSV"],
-    help="Les données synthétiques marchent hors-ligne ; yfinance nécessite un accès réseau réel.",
+st.title("📈 Black-Box Scanner")
+st.caption(
+    "Cherche une action, l'analyse tourne sur la bougie d'entrée choisie (par défaut 5 min) "
+    "confirmée par une tendance de plus haut niveau -- exactement le fallback "
+    "mean-reversion → momentum → price-action du moteur live."
 )
+
+col_symbol, col_tf, col_btn, col_demo = st.columns([3, 3, 1.4, 1.8])
+with col_symbol:
+    symbol = st.text_input("Symbole", value="ORCL", placeholder="ex : ORCL, AAPL, TSLA", label_visibility="collapsed")
+with col_tf:
+    tf_label = st.selectbox("Horizon d'analyse", list(TIMEFRAME_OPTIONS.keys()), label_visibility="collapsed")
+with col_btn:
+    analyze_clicked = st.button("🔍 Analyser", use_container_width=True, type="primary")
+with col_demo:
+    demo_mode = st.checkbox("Mode démo (hors-ligne)", help="Données synthétiques -- utile si le marché est fermé ou le réseau indisponible.")
+
+tf_conf = TIMEFRAME_OPTIONS[tf_label]
+
+with st.expander("⚙️ Paramètres avancés (stratégie, risque, données)"):
+    adv_col1, adv_col2, adv_col3 = st.columns(3)
+    with adv_col1:
+        st.markdown("**Mean-reversion**")
+        lookback = st.slider("Lookback", 20, 120, 60)
+        entry_z = st.slider("Z-score d'entrée", 0.5, 3.0, 2.0)
+        exit_z = st.slider("Z-score de sortie", 0.1, 1.5, 0.5)
+    with adv_col2:
+        st.markdown("**Momentum**")
+        fast = st.slider("MA rapide", 5, 50, 20)
+        slow = st.slider("MA lente", 50, 200, 100)
+        train_meta = st.checkbox("Entraîner le meta-modèle ML (Random Forest + PurgedKFold)")
+    with adv_col3:
+        st.markdown("**Risque & coûts**")
+        capital = st.number_input("Capital", value=100_000.0, step=10_000.0)
+        commission_bps = st.number_input("Commission (bps)", value=0.5)
+        slippage_bps = st.number_input("Slippage (bps)", value=1.0)
+        atr_stop_mult = st.number_input("Stop (x ATR)", value=2.5)
+        atr_tp_mult = st.number_input("Take-profit (x ATR)", value=5.0)
+
+    st.markdown("**Import CSV** (remplace la recherche par action pour ce run)")
+    uploaded = st.file_uploader("Colonnes attendues : date, open, high, low, close, volume", label_visibility="collapsed")
+
+# ---------------------------------------------------------------------------
+# Resolve data source
+# ---------------------------------------------------------------------------
 
 df: pd.DataFrame | None = None
 load_error: str | None = None
+label = ""
 
-if source == "Données synthétiques (démo)":
-    regime = st.sidebar.selectbox(
-        "Régime simulé", ["Mean-reverting (Ornstein-Uhlenbeck)", "Tendance", "Marche aléatoire"]
-    )
-    n_bars = st.sidebar.slider("Nombre de bougies", 200, 3000, 800, step=100)
-    seed = st.sidebar.number_input("Seed aléatoire", value=42, step=1)
-    df = _generate_synthetic_ohlcv(n_bars, regime, int(seed))
-    label = f"synthétique ({regime}, {n_bars} bougies)"
-
-elif source == "Données réelles (yfinance)":
-    symbol = st.sidebar.text_input("Symbole", value="SPY")
-    bar_size = st.sidebar.selectbox("Taille de bougie", ["1D", "1H", "1min"])
-    start = st.sidebar.text_input("Début", value="500d ago")
-    if st.sidebar.button("Charger"):
-        try:
-            df = _fetch_yfinance(symbol, start, bar_size)
-        except Exception as exc:
-            load_error = str(exc)
-    label = f"{symbol} ({bar_size}, yfinance)"
-
+if uploaded is not None:
+    try:
+        df = _load_csv(uploaded)
+        label = "CSV importé"
+    except Exception as exc:
+        load_error = str(exc)
+elif demo_mode:
+    freq = {"5min": "5min", "15min": "15min", "1H": "1h", "1D": "1D"}[tf_conf["bar_size"]]
+    n_bars = 600 if tf_conf["bar_size"] in ("5min", "15min") else 400
+    df = _generate_synthetic_ohlcv(n_bars, freq, "mean_reverting", seed=hash(symbol) % 1000)
+    label = f"{symbol.upper()} (démo synthétique, {tf_label})"
 else:
-    uploaded = st.sidebar.file_uploader("Fichier CSV (colonnes: date, open, high, low, close, volume)")
-    if uploaded is not None:
-        try:
-            df = _load_csv(uploaded)
-        except Exception as exc:
-            load_error = str(exc)
-    label = "CSV importé"
-
-st.sidebar.header("Paramètres de stratégie")
-lookback = st.sidebar.slider("Lookback mean-reversion", 20, 120, 60)
-entry_z = st.sidebar.slider("Z-score d'entrée", 0.5, 3.0, 2.0)
-exit_z = st.sidebar.slider("Z-score de sortie", 0.1, 1.5, 0.5)
-fast = st.sidebar.slider("MA rapide (momentum)", 5, 50, 20)
-slow = st.sidebar.slider("MA lente (momentum)", 50, 200, 100)
-
-st.sidebar.header("Risque & coûts")
-capital = st.sidebar.number_input("Capital", value=100_000.0, step=10_000.0)
-commission_bps = st.sidebar.number_input("Commission (bps)", value=0.5)
-slippage_bps = st.sidebar.number_input("Slippage (bps)", value=1.0)
-atr_stop_mult = st.sidebar.number_input("Stop (x ATR)", value=2.5)
-atr_tp_mult = st.sidebar.number_input("Take-profit (x ATR)", value=5.0)
-
-train_meta = st.sidebar.checkbox(
-    "Entraîner le meta-modèle ML (Random Forest + PurgedKFold)",
-    help="Plus lent : entraîne le classifieur de meta-labeling sur l'historique chargé.",
-)
-
-# ---------------------------------------------------------------------------
-# Main content
-# ---------------------------------------------------------------------------
-
-st.title("📈 Black-Box — Site de test interactif")
-st.caption(
-    "Backtest et inspection des signaux (mean-reversion, momentum, confluence price-action) "
-    "sur des données réelles ou synthétiques, sans jamais toucher un broker."
-)
+    try:
+        df = _fetch_yfinance(symbol.strip().upper(), tf_conf["start"], tf_conf["bar_size"])
+        label = f"{symbol.upper()} ({tf_label}, yfinance)"
+    except Exception as exc:
+        load_error = str(exc)
 
 if load_error:
-    st.error(f"Erreur de chargement des données : {load_error}")
+    st.error(
+        f"Impossible de charger **{symbol.upper()}** en direct : {load_error}\n\n"
+        "Coche **Mode démo (hors-ligne)** pour tester le scanner sans accès réseau, "
+        "ou vérifie le symbole."
+    )
     st.stop()
 
 if df is None or df.empty:
-    st.info("Choisis une source de données dans la barre latérale pour commencer.")
+    st.info("Entre un symbole et clique sur **Analyser** pour lancer le scan.")
     st.stop()
 
 df = DataCleaner.clean(df)
-if len(df) < max(slow, lookback) + 10:
-    st.warning("Pas assez de bougies pour ces paramètres de lookback -- réduis-les ou charge plus d'historique.")
+min_required = max(slow, lookback) + 10
+if len(df) < min_required:
+    st.warning(
+        f"Pas assez de bougies ({len(df)} chargées, {min_required} nécessaires) pour ces paramètres -- "
+        "élargis la fenêtre de données ou réduis les lookbacks dans les paramètres avancés."
+    )
     st.stop()
 
-st.success(f"Données chargées : {label} — {len(df)} bougies, du {df.index[0].date()} au {df.index[-1].date()}")
+# ---------------------------------------------------------------------------
+# Run the three-tier signal fallback (mean-reversion -> momentum -> price-action)
+# ---------------------------------------------------------------------------
 
-tab_backtest, tab_signals, tab_data = st.tabs(["🧪 Backtest", "🔍 Signaux", "🗂 Données brutes"])
+mr = MeanReversionSignal(lookback=lookback, entry_z=entry_z, exit_z=exit_z)
+mom = MomentumSignal(fast=fast, slow=slow)
+pa = PriceActionConfluenceSignal(htf_rule=tf_conf["htf_rule"])
 
-# -- Backtest tab -------------------------------------------------------------
+with st.spinner("Analyse en cours (le test ADF de stationnarité peut prendre quelques secondes)..."):
+    mr_result = mr.generate(df)
+    mom_result = mom.generate(df)
+    pa_result = pa.generate(df)
 
-with tab_backtest:
-    result = run_backtest(
-        df,
-        starting_capital=capital,
-        commission_bps=commission_bps,
-        slippage_bps=slippage_bps,
-        lookback=lookback,
-    )
+last_mr, last_mom, last_pa = int(mr_result.side.iloc[-1]), int(mom_result.side.iloc[-1]), int(pa_result.side.iloc[-1])
+pa_strength = float(pa_result.strength.iloc[-1])
 
-    cols = st.columns(5)
-    cols[0].metric("Sharpe", f"{result.sharpe:.2f}")
-    cols[1].metric("Sortino", f"{result.sortino:.2f}")
-    cols[2].metric("Max Drawdown", f"{result.max_drawdown * 100:.1f}%")
-    cols[3].metric("CAGR", f"{result.cagr * 100:.1f}%")
-    cols[4].metric("Turnover moyen", f"{result.turnover:.3f}")
+if last_mr != 0:
+    active_tier, primary_side = "Mean-reversion", last_mr
+elif last_mom != 0:
+    active_tier, primary_side = "Momentum", last_mom
+else:
+    active_tier, primary_side = "Price-action", last_pa
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=result.equity_curve.index, y=result.equity_curve, name="Équity", line=dict(color="#4C9AFF")))
-    fig.update_layout(title="Courbe d'équity (coûts inclus)", xaxis_title="Date", yaxis_title="Équity ($)", height=420)
-    st.plotly_chart(fig, use_container_width=True)
+confidence = pa_strength if active_tier == "Price-action" and primary_side != 0 else 0.5
 
-# -- Signals tab -------------------------------------------------------------
+price = float(df["close"].iloc[-1])
+atr = float(average_true_range(df).iloc[-1])
+last_ts = df.index[-1]
 
-with tab_signals:
-    mr = MeanReversionSignal(lookback=lookback, entry_z=entry_z, exit_z=exit_z)
-    mom = MomentumSignal(fast=fast, slow=slow)
+# ---------------------------------------------------------------------------
+# Recommendation card
+# ---------------------------------------------------------------------------
 
-    # Pick a confirmation timeframe strictly coarser than the data's own
-    # cadence (same rule the engine applies) -- resampling to something
-    # finer than the source bars would silently produce a mostly-NaN
-    # trend filter.
-    median_delta = df.index.to_series().diff().median()
-    if median_delta <= pd.Timedelta(minutes=1):
-        htf_rule = "15min"
-    elif median_delta <= pd.Timedelta(minutes=15):
-        htf_rule = "1h"
-    elif median_delta <= pd.Timedelta(hours=1):
-        htf_rule = "4h"
-    elif median_delta <= pd.Timedelta(hours=4):
-        htf_rule = "1D"
-    else:
-        htf_rule = "1W"
-    pa = PriceActionConfluenceSignal(htf_rule=htf_rule)
+badge_color = {1: GOOD, -1: CRITICAL, 0: MUTED}[primary_side]
+badge_text = {1: "🟢 ACHAT", -1: "🔴 VENTE À DÉCOUVERT", 0: "⚪ NEUTRE"}[primary_side]
 
-    with st.spinner("Calcul des signaux (le test ADF de mean-reversion peut prendre quelques secondes)..."):
-        mr_result = mr.generate(df)
-        mom_result = mom.generate(df)
-        pa_result = pa.generate(df)
+st.markdown(
+    f"""
+    <div class="bb-card">
+        <div class="bb-symbol">{symbol.upper()} · {last_ts.strftime('%Y-%m-%d %H:%M UTC')}</div>
+        <div style="display:flex; align-items:baseline; gap:18px; margin:6px 0;">
+            <span class="bb-price">{price:,.2f}</span>
+            <span class="bb-badge" style="background:{badge_color};">{badge_text}</span>
+        </div>
+        <div class="bb-sub">
+            Régime actif : <b>{active_tier}</b> &nbsp;·&nbsp;
+            Horizon indicatif : <b>{tf_conf['horizon']}</b>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-    last_mr, last_mom, last_pa = int(mr_result.side.iloc[-1]), int(mom_result.side.iloc[-1]), int(pa_result.side.iloc[-1])
-    if last_mr != 0:
-        active_tier, primary_side = "Mean-reversion", last_mr
-    elif last_mom != 0:
-        active_tier, primary_side = "Momentum", last_mom
-    else:
-        active_tier, primary_side = "Price-action (confluence)", last_pa
+card_col, gauge_col = st.columns([2, 1])
 
-    direction = {1: "LONG 🟢", -1: "SHORT 🔴", 0: "FLAT ⚪"}[primary_side]
-    st.subheader(f"Décision actuelle : {direction}")
-    st.caption(f"Régime actif : **{active_tier}** (ordre de repli mean-reversion → momentum → price-action)")
-
-    atr = float(average_true_range(df).iloc[-1])
-    price = float(df["close"].iloc[-1])
+with card_col:
     if primary_side != 0:
         limits = RiskLimits(atr_stop_multiple=atr_stop_mult, atr_tp_multiple=atr_tp_mult)
         rm = RiskManager(limits=limits, starting_equity=capital)
         stop = rm.compute_stop_price(price, atr, primary_side)
         tp = rm.compute_take_profit_price(price, atr, primary_side)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Prix actuel", f"{price:.4f}")
-        c2.metric("Stop-loss (ATR)", f"{stop:.4f}")
-        c3.metric("Take-profit (ATR)", f"{tp:.4f}")
+        risk = abs(price - stop)
+        reward = abs(tp - price)
+        rr = reward / risk if risk > 0 else 0.0
 
-    if train_meta:
-        with st.spinner("Entraînement du meta-modèle (PurgedKFold)..."):
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Entrée", f"{price:.4f}")
+        m2.metric("Stop-loss (ATR)", f"{stop:.4f}", delta=f"{(stop / price - 1) * 100:.2f}%")
+        m3.metric("Take-profit (ATR)", f"{tp:.4f}", delta=f"{(tp / price - 1) * 100:.2f}%")
+        m4.metric("Risque/Rendement", f"1:{rr:.2f}")
+    else:
+        st.info("Aucun signal actif : les trois régimes (mean-reversion, momentum, price-action) sont neutres en ce moment.")
+
+    st.markdown("**Pourquoi cette décision ?**")
+    t1, t2, t3 = st.columns(3)
+    for col, name, side in (
+        (t1, "Mean-reversion", last_mr),
+        (t2, "Momentum", last_mom),
+        (t3, "Price-action", last_pa),
+    ):
+        icon = "🟢" if side == 1 else "🔴" if side == -1 else "⚪"
+        word = "LONG" if side == 1 else "SHORT" if side == -1 else "Neutre"
+        col.markdown(
+            f'<div class="bb-tier"><div class="bb-tier-name">{name}</div>'
+            f'<div class="bb-tier-val">{icon} {word}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+with gauge_col:
+    gauge = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=confidence * 100,
+        number={"suffix": "%", "font": {"size": 32}},
+        title={"text": "Confiance", "font": {"size": 14}},
+        gauge={
+            "axis": {"range": [0, 100], "tickwidth": 1},
+            "bar": {"color": badge_color},
+            "bgcolor": "rgba(0,0,0,0)",
+            "steps": [
+                {"range": [0, 40], "color": "rgba(137,135,129,0.18)"},
+                {"range": [40, 70], "color": "rgba(137,135,129,0.30)"},
+                {"range": [70, 100], "color": "rgba(137,135,129,0.42)"},
+            ],
+        },
+    ))
+    gauge.update_layout(height=220, margin=dict(t=40, b=10, l=20, r=20))
+    st.plotly_chart(gauge, use_container_width=True)
+    st.caption(
+        "50% = régime neutre par défaut (pas de meta-modèle entraîné). "
+        "Coche l'entraînement du meta-modèle dans les paramètres avancés pour une "
+        "confiance calibrée par validation croisée purgée."
+    )
+
+st.success(f"Données : {label} — {len(df)} bougies, du {df.index[0]} au {df.index[-1]}")
+
+# ---------------------------------------------------------------------------
+# Recent price action with entry markers
+# ---------------------------------------------------------------------------
+
+st.subheader("Prix récent et points d'entrée")
+st.caption(
+    "Fenêtre récente uniquement -- seuls les changements de régime (entrées) sont marqués, "
+    "la couleur identifie le signal, la forme la direction (▲ long / ▼ short)."
+)
+
+window = df.tail(min(300, len(df)))
+fig = go.Figure()
+fig.add_trace(go.Scatter(
+    x=window.index, y=window["close"], name="Close", mode="lines",
+    line=dict(color=MUTED, width=1.5),
+))
+
+for name, res in (("Mean-reversion", mr_result), ("Momentum", mom_result), ("Price-action", pa_result)):
+    side = res.side.reindex(window.index).fillna(0)
+    entered = side.diff().fillna(side)
+    longs = window.index[(side == 1) & (entered != 0)]
+    shorts = window.index[(side == -1) & (entered != 0)]
+    color = TIER_COLORS[name]
+    if len(longs):
+        fig.add_trace(go.Scatter(
+            x=longs, y=window.loc[longs, "close"], mode="markers", name=f"{name} ▲",
+            marker=dict(color=color, symbol="triangle-up", size=12, line=dict(width=1, color="rgba(0,0,0,0.3)")),
+        ))
+    if len(shorts):
+        fig.add_trace(go.Scatter(
+            x=shorts, y=window.loc[shorts, "close"], mode="markers", name=f"{name} ▼",
+            marker=dict(color=color, symbol="triangle-down", size=12, line=dict(width=1, color="rgba(0,0,0,0.3)")),
+        ))
+
+fig.update_layout(
+    height=460, template="plotly_white", xaxis_title=None, yaxis_title="Prix",
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    margin=dict(t=10, b=10, l=10, r=10),
+)
+fig.update_xaxes(gridcolor="#e1e0d9", showgrid=False)
+fig.update_yaxes(gridcolor="#e1e0d9")
+st.plotly_chart(fig, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Advanced sections: meta-model, full backtest, raw data
+# ---------------------------------------------------------------------------
+
+if train_meta:
+    with st.expander("🤖 Meta-modèle ML (Random Forest + PurgedKFold)", expanded=True):
+        with st.spinner("Entraînement (validation croisée purgée)..."):
             primary = mr_result.side[mr_result.side != 0]
             if len(primary) < 100:
-                st.warning("Pas assez de signaux mean-reversion pour entraîner le meta-modèle sur cet historique.")
+                st.warning("Pas assez de signaux mean-reversion sur cet historique pour entraîner le meta-modèle.")
             else:
                 daily_vol = get_daily_vol(df["close"])
                 barriers = apply_triple_barrier(df["close"], primary.index, daily_vol)
@@ -269,39 +422,23 @@ with tab_signals:
                     st.metric("Précision OOS (PurgedKFold)", f"{meta_result.oos_accuracy * 100:.1f}%")
                     st.bar_chart(meta_result.feature_importances)
 
-    st.subheader("Prix et points d'entrée dans le temps")
-    st.caption(
-        "Seuls les changements de régime (entrées) sont marqués -- le momentum est "
-        "presque toujours \"dans le marché\" et marquer chaque bougie noierait le graphique."
+with st.expander("🧪 Backtest détaillé"):
+    result = run_backtest(
+        df, starting_capital=capital, commission_bps=commission_bps,
+        slippage_bps=slippage_bps, lookback=lookback,
     )
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df.index, y=df["close"], name="Close", line=dict(color="#888")))
+    b1, b2, b3, b4, b5 = st.columns(5)
+    b1.metric("Sharpe", f"{result.sharpe:.2f}")
+    b2.metric("Sortino", f"{result.sortino:.2f}")
+    b3.metric("Max Drawdown", f"{result.max_drawdown * 100:.1f}%")
+    b4.metric("CAGR", f"{result.cagr * 100:.1f}%")
+    b5.metric("Turnover moyen", f"{result.turnover:.3f}")
 
-    for name, res, color, symbol_marker in (
-        ("Mean-reversion", mr_result, "#2ecc71", "circle"),
-        ("Momentum", mom_result, "#3498db", "triangle-up"),
-        ("Price-action", pa_result, "#e67e22", "star"),
-    ):
-        side = res.side.fillna(0)
-        entered = side.diff().fillna(side)  # first non-zero value also counts as an entry
-        long_entries = df.index[(side == 1) & (entered != 0)]
-        short_entries = df.index[(side == -1) & (entered != 0)]
-        if len(long_entries):
-            fig.add_trace(go.Scatter(
-                x=long_entries, y=df.loc[long_entries, "close"], mode="markers", name=f"{name} LONG",
-                marker=dict(color=color, symbol=symbol_marker, size=11, line=dict(width=1, color="black")),
-            ))
-        if len(short_entries):
-            fig.add_trace(go.Scatter(
-                x=short_entries, y=df.loc[short_entries, "close"], mode="markers", name=f"{name} SHORT",
-                marker=dict(color=color, symbol=symbol_marker, size=11, line=dict(width=2, color="red")),
-            ))
+    eq_fig = go.Figure()
+    eq_fig.add_trace(go.Scatter(x=result.equity_curve.index, y=result.equity_curve, name="Équity", line=dict(color=TIER_COLORS["Mean-reversion"])))
+    eq_fig.update_layout(title="Courbe d'équity (coûts inclus)", template="plotly_white", height=380, margin=dict(t=40, b=10, l=10, r=10))
+    st.plotly_chart(eq_fig, use_container_width=True)
 
-    fig.update_layout(height=520, xaxis_title="Date", yaxis_title="Prix")
-    st.plotly_chart(fig, use_container_width=True)
-
-# -- Raw data tab -------------------------------------------------------------
-
-with tab_data:
+with st.expander("🗂 Données brutes"):
     st.dataframe(df.tail(300), use_container_width=True)
     st.write(df.describe())

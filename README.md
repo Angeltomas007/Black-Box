@@ -160,24 +160,32 @@ python main.py backtest --symbol SPY --start 2018-01-01
 python main.py live
 ```
 
-## Site de test interactif
+## Site de test interactif -- Black-Box Scanner
 
-Un dashboard Streamlit (`webapp/app.py`) pour explorer visuellement ce
-que la black box "voit" sans jamais toucher un broker :
+Un dashboard Streamlit (`webapp/app.py`) façon scanner : tape un
+symbole, choisis un horizon, clique **Analyser**, et obtiens une
+recommandation claire sans jamais toucher un broker.
 
-- **Source de données** : synthétique hors-ligne (mean-reverting,
-  tendance, marche aléatoire), yfinance en direct, ou import d'un CSV
-  perso (`date, open, high, low, close, volume`).
-- **Onglet Backtest** : Sharpe/Sortino/max drawdown/CAGR/turnover et
-  courbe d'équity nette de coûts, paramètres ajustables en direct dans
-  la barre latérale.
-- **Onglet Signaux** : décision actuelle (LONG/SHORT/FLAT) et le
-  palier actif du fallback mean-reversion → momentum → price-action,
-  stop-loss/take-profit ATR calculés pour cette décision, graphique des
-  points d'entrée de chaque signal, et un entraînement optionnel du
-  meta-modèle ML (Random Forest + PurgedKFold) avec précision OOS et
-  importances des features.
-- **Onglet Données brutes** : aperçu du DataFrame OHLCV chargé.
+- **Recherche par action** : n'importe quel ticker yfinance (ex.
+  `ORCL`, `AAPL`, `TSLA`). Un **mode démo hors-ligne** (données
+  synthétiques) permet de tester le scanner sans accès réseau ou
+  marché fermé -- utile aussi pour l'import d'un CSV perso (`date,
+  open, high, low, close, volume`).
+- **Horizons d'analyse** : 5 min (scalp), 15 min (intraday), 1 heure
+  (swing court) ou 1 jour (position). Chaque horizon fixe
+  automatiquement la bougie d'entrée et sa confirmation de tendance sur
+  un timeframe strictement plus large (ex. 5 min confirmé par 30 min),
+  exactement le mapping qu'utilise le moteur live.
+- **Carte de recommandation** : badge ACHAT / VENTE À DÉCOUVERT /
+  NEUTRE, régime actif du fallback mean-reversion → momentum →
+  price-action, horizon de tenue indicatif, entrée/stop/take-profit
+  ATR et ratio risque/rendement, jauge de confiance, et le détail
+  "pourquoi cette décision" (quel palier a voté quoi).
+- **Paramètres avancés** (repliés par défaut) : réglages stratégie et
+  risque, entraînement optionnel du meta-modèle ML (Random Forest +
+  PurgedKFold) avec précision OOS et importances des features,
+  backtest détaillé (Sharpe/Sortino/max drawdown/CAGR/turnover) et
+  aperçu des données brutes.
 
 ```bash
 pip install -r requirements-web.txt

@@ -55,7 +55,13 @@ class YFinanceProvider(MarketDataProvider):
     ) -> pd.DataFrame:
         import yfinance as yf
 
-        interval = {"1D": "1d", "1H": "1h", "1min": "1m"}.get(bar_size, "1d")
+        interval_map = {
+            "1D": "1d", "1H": "1h", "1min": "1m",
+            "5min": "5m", "15min": "15m", "30min": "30m",
+        }
+        if bar_size not in interval_map:
+            raise ValueError(f"Unsupported bar_size {bar_size!r}; expected one of {sorted(interval_map)}")
+        interval = interval_map[bar_size]
         raw = yf.download(
             symbol, start=start, end=end, interval=interval, progress=False, auto_adjust=True
         )
