@@ -160,6 +160,30 @@ python main.py backtest --symbol SPY --start 2018-01-01
 python main.py live
 ```
 
+## Site de test interactif
+
+Un dashboard Streamlit (`webapp/app.py`) pour explorer visuellement ce
+que la black box "voit" sans jamais toucher un broker :
+
+- **Source de données** : synthétique hors-ligne (mean-reverting,
+  tendance, marche aléatoire), yfinance en direct, ou import d'un CSV
+  perso (`date, open, high, low, close, volume`).
+- **Onglet Backtest** : Sharpe/Sortino/max drawdown/CAGR/turnover et
+  courbe d'équity nette de coûts, paramètres ajustables en direct dans
+  la barre latérale.
+- **Onglet Signaux** : décision actuelle (LONG/SHORT/FLAT) et le
+  palier actif du fallback mean-reversion → momentum → price-action,
+  stop-loss/take-profit ATR calculés pour cette décision, graphique des
+  points d'entrée de chaque signal, et un entraînement optionnel du
+  meta-modèle ML (Random Forest + PurgedKFold) avec précision OOS et
+  importances des features.
+- **Onglet Données brutes** : aperçu du DataFrame OHLCV chargé.
+
+```bash
+pip install -r requirements-web.txt
+streamlit run webapp/app.py
+```
+
 ## Tests
 
 Suite pytest (55 tests) couvrant : nettoyage de données et bars dollar,
